@@ -1,0 +1,72 @@
+# INTERNAL NAMES
+ptype_names:
+  gas: PartType0
+  dm: PartType1
+  star: PartType4
+  bh: PartType5
+
+ptype_lists:
+  gas: glist
+  dm: dmlist
+  star: slist
+  bh: bhlist
+
+prop_aliases:
+  pos: Coordinates
+  vel: Velocities
+  mass: Masses
+  u: InternalEnergy
+  temp: InternalEnergy
+  temperature: InternalEnergy
+  rho: Density
+  nh: NeutralHydrogenAbundance
+  sfr: StarFormationRate
+  metallicity: Metallicity
+  age: StellarFormationTime
+  potential: Potential
+  fH2: FractionH2
+  bhmass: BH_Mass
+  bhmdot: BH_Mdot
+
+prop_columns:
+  pos: [x, y, z]
+  vel: [vx, vy, vz]
+
+groups: [halos, galaxies]
+groupIDs:
+  halos: HaloID
+  galaxies: GalID
+
+
+# CONSTANTS
+MINIMUM_STARS_PER_GALAXY: 16
+MINIMUM_DM_PER_HALO: 24
+MINIMUM_GAS_PER_CLOUD: 16
+nHlim: 0.13
+Tlim: 1.0e5
+XH: 0.76
+
+
+# UNITS
+prop_units:
+  pos: kpc*a/h
+  vel: km/s*a**(1/2)
+  mass: 1.e10 * Msun/h
+  temperature: K
+  rho: 1.e10 * Msun/h / (kpc*a/h)**3
+  nh: 1.e10 * Msun/h
+  sfr: 1.e10 * Msun/h/s
+  bhmass: 1.e10 * Msun/h
+  bhmdot: 1.e10 * Msun/h/s
+
+code_units:
+  pos: kpc*a
+  vel: km/s
+  mass: Msun
+  temperature: K
+  rho: g/cm**3
+  rhocrit: Msun/kpc**3
+  nh: Msun
+  sfr: Msun/s
+  bhmass: Msun
+  bhmdot: Msun/s

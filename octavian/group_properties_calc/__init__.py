@@ -1,0 +1,1 @@
+from octavian.group_properties_calc.calculate_group_properties import calculate_group_properties

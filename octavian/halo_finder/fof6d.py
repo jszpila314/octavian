@@ -1,17 +1,17 @@
 from __future__ import annotations
-import numpy as np
-import pandas as pd
-import unyt
-from sklearn.neighbors import NearestNeighbors
-import octavian.constants as c
-from joblib import Parallel, delayed
-
 from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
   from octavian.data_manager import DataManager
 
+import numpy as np
+import pandas as pd
+import unyt
+from sklearn.neighbors import NearestNeighbors
+from joblib import Parallel, delayed
+
+
 # get mis for fof6d
-def get_mean_interparticle_separation(data_manager: DataManager) -> None:
+def get_mean_interparticle_separation(data_manager: 'DataManager') -> None:
   t = data_manager.simulation['time']
   a = data_manager.simulation['a']
   h = data_manager.simulation['h']
@@ -41,13 +41,13 @@ def get_mean_interparticle_separation(data_manager: DataManager) -> None:
   mis = ((dmmass / ndm / rhodm)**(1./3.))/h
   efres = int(boxsize/h/mis)
 
-  data_manager.mis = mis.d
+  data_manager.mis = mis
   data_manager.efres = efres
   data_manager.Ob = Ob
 
 
 # initial assignment of galaxy ids through sorting in x,y,z directions
-def fof_sort_halo(halo: pd.DataFrame, minstars: int, fof_LL: float) -> pd.DataFrame:
+def fof_sort_halo(halo: 'pd.DataFrame', minstars: int, fof_LL: float) -> 'pd.DataFrame':
   for direction in ['x', 'y', 'z']:
     halo = halo.sort_values(by=['GalID', direction])
     halo['distance'] = np.diff(halo[direction], prepend=halo[direction].iloc[0])
@@ -95,7 +95,7 @@ def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: in
   if vel_LL is None:
     galaxies = [[(i, group_ptype.index) for i, group_ptype in group.groupby(by='ptype')] for group in groups]
     return galaxies
-
+  
   # stage 2: fof6d
   new_groups = []
   for group in groups:
@@ -145,7 +145,7 @@ def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: in
       
       ordered_indexes = np.sort(list(galaxy))
       galaxy = group.iloc[ordered_indexes]
-      if len(galaxy.loc[galaxy['ptype'] == 4]) >= minstars:
+      if len(galaxy.loc[galaxy['ptype'] == 'star']) >= minstars:
         new_groups.append(galaxy)
 
   galaxies = [[(i, group_ptype.index) for i, group_ptype in group.groupby(by='ptype')] for group in new_groups]
@@ -154,41 +154,55 @@ def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: in
 
 # vectorised version of caesar fof6d
 def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
+  config = data_manager.config
+
+  for ptype in config['ptypes']:
+    data_manager.load_property('mass', ptype)
+
+  data_manager.mdm_total = np.sum(data_manager.data['dm']['mass'])
+  data_manager.ndm = len(data_manager.data['dm'])
+
+  data_manager.mgas_total = 0. if 'gas' not in config['ptypes'] else np.sum(data_manager.data['gas']['mass'])
+  data_manager.mstar_total = 0. if 'star' not in config['ptypes'] else np.sum(data_manager.data['star']['mass'])
+  data_manager.mbh_total = 0. if 'bh' not in config['ptypes'] else np.sum(data_manager.data['bh']['mass'])
+
   get_mean_interparticle_separation(data_manager)
 
   b = 0.02
   fof_LL = data_manager.mis * b
   vel_LL = 1.
 
-  for ptype in ['gas', 'dm', 'star', 'bh']:
+  for ptype in config['ptypes']:
     data_manager.load_property('vel', ptype)
 
   # check dense
   for prop in ['rho', 'temperature', 'sfr']:
     data_manager.load_property(prop, 'gas')
 
-  data_manager['gas']['temperature'] = 0.
-  data_manager['gas']['dense_gas'] = (data_manager['gas']['rho'] > c.nHlim) & ((data_manager['gas']['temperature'] < c.Tlim) | (data_manager['gas']['sfr'] > 0))
+  data_manager.data['gas']['temperature'] = 0.
+  data_manager.data['gas']['dense_gas'] = (data_manager.data['gas']['rho'] > config['nHlim']) & ((data_manager.data['gas']['temperature'] < config['Tlim']) | (data_manager.data['gas']['sfr'] > 0))
   
   # combine dfs, reduce the gas df to common columns
   fof_columns = ['HaloID', 'x', 'y', 'z', 'vx', 'vy', 'vz', 'ptype']
-  fof_filter = lambda halo: len(halo) >= c.MINIMUM_STARS_PER_GALAXY
-  fof_halos = data_manager['star'].groupby('HaloID').filter(fof_filter)
+  fof_filter = lambda halo: len(halo) >= config['MINIMUM_STARS_PER_GALAXY']
+  fof_halos = data_manager.data['star'].groupby('HaloID', observed=True).filter(fof_filter)
   fof_haloids = np.unique(fof_halos['HaloID'])
-  fof_halos = pd.concat([data_manager['gas'].loc[data_manager['gas']['dense_gas'], fof_columns], data_manager['star'][fof_columns], data_manager['bh'][fof_columns]]).query('HaloID in @fof_haloids')
+  fof_halos = pd.concat([data_manager.data['gas'].loc[data_manager.data['gas']['dense_gas'], fof_columns], data_manager.data['star'][fof_columns], data_manager.data['bh'][fof_columns]]).query('HaloID in @fof_haloids')
 
   fof_halos['GalID'] = 0
   kernel_table = create_kernel_table(fof_LL)
-  grouped = fof_halos.groupby(by='HaloID')
+  grouped = fof_halos.groupby(by='HaloID', observed=True)
 
-  galaxies = Parallel(n_jobs=nproc)(delayed(run_fof6d_in_halo)(halo, kernel_table, c.MINIMUM_STARS_PER_GALAXY, fof_LL, vel_LL) for idx, halo in grouped)
+  galaxies = Parallel(n_jobs=nproc)(delayed(run_fof6d_in_halo)(halo, kernel_table, config['MINIMUM_STARS_PER_GALAXY'], fof_LL, vel_LL) for idx, halo in grouped)
   galaxies = [galaxy for galaxy_list in galaxies for galaxy in galaxy_list if len(galaxy_list) != 0]
+  
 
-  for ptype in ['gas', 'dm', 'star', 'bh']:
-    data_manager[ptype]['GalID'] = -1
+  for ptype in config['ptypes']:
+    data_manager.data[ptype]['GalID'] = -1
   
   for i, galaxy in enumerate(galaxies):
-    for ptype_id, ptype_indexes in galaxy:
-      data_manager[c.ptype_names[ptype_id]].loc[ptype_indexes, 'GalID'] = i
+    for ptype, ptype_indexes in galaxy:
+      data_manager.data[ptype].loc[ptype_indexes, 'GalID'] = i
 
-  data_manager.galaxies = pd.DataFrame(index=np.arange(len(galaxies)))
+  for ptype in config['ptypes']:
+    data_manager.data[ptype]['GalID'] = data_manager.data[ptype]['GalID'].astype('category')
