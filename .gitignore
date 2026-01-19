@@ -4,3 +4,29 @@
 /.vscode
 */__pycache__
 octavian/*/__pycache__
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+*.egg
+
+# Conda
+envs/
+octavian-env/
+*.conda
+*.ipynb_checkpoints/
+
+# Jupyter
+.ipynb_checkpoints
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+code_graveyard.py
+test_imports.py
