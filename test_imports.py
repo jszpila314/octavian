@@ -9,9 +9,9 @@ print(f"octavian imported successfully.")
 print(f"Packages imported successfully!")
 
 
-path_to_snapshot = "/home/jp_duminy/SHP_Code/snap_m25n512_062.hdf5"
-path_to_output = "/home/jp_duminy/SHP_Code/snapshot_filtered.hdf5"
-path_to_config = "/home/jp_duminy/SHP_Code/octavian-1/config.yaml"
+path_to_snapshot = "/disk04/rad/sim/m25n512/s50/snap_m25n512_062.hdf5"
+path_to_output = "/home/jpduminy/octavian-analysis"
+path_to_config = "/home/jpduminy/octavian_scripts/octavian-1/config.yaml"
 
 print(f"Attempting to filter snapshot...")
 
@@ -24,4 +24,3 @@ print(f"Running Octavian...")
 octavian.run(path_to_snapshot, path_to_output, path_to_config)
 
 print(f"Success.")
-            
