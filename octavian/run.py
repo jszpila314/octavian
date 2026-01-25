@@ -13,7 +13,7 @@ def run(snapshot: str, outfile: str, configfile: str):
   # mpi functionality; check whether it is installed and if not use serial case
   try: 
     from mpi4py import MPI
-    comm = MPI_COMM_WORLD()
+    comm = MPI.COMM_WORLD()
     rank = comm.Get_rank()
   except ImportError:
     comm = None
