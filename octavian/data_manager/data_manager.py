@@ -7,7 +7,12 @@ from sympy import sympify
 
 
 class DataManager:
-  def __init__(self, snapfile: str, config: dict):
+  def __init__(self, snapfile: str, config: dict, comm=None):
+    # mpi functionality
+    self.comm = comm
+    self.rank = comm.Get_rank() if comm else 0 # if statement allows for serial case
+    self.size = comm.Get_size() if comm else 1
+
     self.snapfile = snapfile
     self.initialise_config(config)
     self.initialise_data()
