@@ -201,7 +201,7 @@ def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
   for ptype in config['ptypes']:
     data_manager.data[ptype]['GalID'] = -1 # this lets us toss particles not in a galaxy for reduced_snapshot?
 
-  halo_ids = list(grouped.grouped.keys()) # list of all halo IDs
+  halo_ids = list(grouped.groups.keys()) # list of all halo IDs
   if data_manager.comm:
     halo_ids_local = np.array_split(halo_ids, data_manager.size)[data_manager.rank] # uses modulo to assign each worker its halos
   else:
@@ -228,9 +228,9 @@ def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
   num_galaxies_all = data_manager.comm.gather(num_galaxies_local, root=0) if data_manager.comm else [num_galaxies_local]
 
   # galaxy IDs need to be global so we want each rank to generate a global ID in its local environment
-  if data_manager.rank == 0:
+  if data_manager.comm and data_manager.rank == 0:
     galaxy_id_offsets = [0] + list(np.cumsum(num_galaxies_all[:-1])) # num_galaxies_all is a nested list of galaxy numbers so cumsum provides offsets
-  else:
+  elif not data_manager.comm:
     galaxy_id_offsets = None
 
   galaxy_id_offsets = data_manager.comm.bcast(galaxy_id_offsets, root=0) if data_manager.comm else galaxy_id_offsets # broadcast the offsets to other ranks
