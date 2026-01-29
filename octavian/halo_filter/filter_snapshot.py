@@ -5,9 +5,9 @@ def find_nearest(array, value):
     idx = (np.abs(array - value)).argmin()
     return array[idx]
 
-def filter_snapshot(snapfile: str, outfile: str):
+def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
   with h5py.File(snapfile, 'r') as f:
-    for i in range(4):
+    for i in range(nsplit):
       with h5py.File(f'{outfile}_{i}.hdf5', 'a') as f_out:
         f.copy(f['Header'], f_out, 'Header')
 
@@ -24,7 +24,10 @@ def filter_snapshot(snapfile: str, outfile: str):
     total = len(ids)
 
     split_ids = [0]
-    for fraction in [0.25, 0.5, 0.75, 1]:
+    split_fractions = np.linspace(0., 1., nsplit + 1)
+    split_fractions = split_fractions[1:]
+    
+    for fraction in split_fractions:
       fraction_count = total * fraction
       split_ids.append(unique_ids[(np.abs(cumulative_counts - fraction_count)).argmin()])
 
