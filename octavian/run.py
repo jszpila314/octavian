@@ -9,19 +9,6 @@ from yaml import safe_load
 
 
 def run(snapshot: str, outfile: str, configfile: str):
-
-  # mpi functionality; check whether it is installed and if not use serial case
-  try: 
-    from mpi4py import MPI
-    comm = MPI.COMM_WORLD()
-    rank = comm.Get_rank()
-  except ImportError:
-    comm = None
-    rank = 0
-
-  if rank == 0:
-    print(f"Initialising Data Manager...")
-
   with open(configfile, 'r') as f:
     config = safe_load(f)
 
