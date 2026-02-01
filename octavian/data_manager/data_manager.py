@@ -72,7 +72,7 @@ class DataManager:
         id_column = groupIDs[group]
         ids.append(self.data[ptype][id_column].unique())
 
-      ids = np.unique(np.concat(ids))
+      ids = np.unique(np.concatenate(ids))
       if group == 'galaxies': ids = ids[ids != -1]
 
       self.group_data[group] = pd.DataFrame(index=ids)
