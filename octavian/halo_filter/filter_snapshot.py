@@ -18,7 +18,7 @@ def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
       ids_ptype = f[ptype]['HaloID'][:]
       ids.append(ids_ptype[ids_ptype != 0])
 
-    ids = np.sort(np.concat(ids))
+    ids = np.sort(np.concatenate(ids))
     unique_ids, counts = np.unique(ids, return_counts=True)
     cumulative_counts = np.cumsum(counts)
     total = len(ids)
