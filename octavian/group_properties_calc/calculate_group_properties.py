@@ -432,13 +432,22 @@ def calculate_group_properties(data_manager: DataManager) -> None:
     aperture_masses = data.groupby(by='HaloID').apply(process_halo, include_groups = False).reset_index(names=['HaloID', 'GalID'])
     aperture_masses.set_index('GalID', inplace=True)
 
-    data_manager.group_data['galaxies']['mass_gas_30kpc'] = aperture_masses['gas']
-    data_manager.group_data['galaxies']['mass_dm_30kpc'] = aperture_masses['dm']
-    data_manager.group_data['galaxies']['mass_star_30kpc'] = aperture_masses['star']
-    data_manager.group_data['galaxies']['mass_bh_30kpc'] = aperture_masses['bh']
-    data_manager.group_data['galaxies']['mass_HI_30kpc'] = aperture_masses['HI']
-    data_manager.group_data['galaxies']['mass_H2_30kpc'] = aperture_masses['H2']
-    data_manager.group_data['galaxies']['mass_total_30kpc'] = data_manager.group_data['galaxies'][['mass_gas_30kpc', 'mass_dm_30kpc', 'mass_star_30kpc', 'mass_bh_30kpc']].sum(axis=1)
+    # when we filter the snapshot not all particle types are necessarily present
+    for ptype in ['gas', 'dm', 'star', 'bh', 'HI', 'H2']:
+      col_name = f'mass_{ptype}_30kpc'
+    if ptype in aperture_masses.columns:
+        data_manager.group_data['galaxies'][col_name] = aperture_masses[ptype]
+    else:
+        data_manager.group_data['galaxies'][col_name] = 0.0 # set equal to 0 if it does not exist
+
+    # then we only sum from existing columns to avoid the key error
+    mass_cols = [col for col in ['mass_gas_30kpc', 'mass_dm_30kpc', 'mass_star_30kpc', 'mass_bh_30kpc'] 
+                if col in data_manager.group_data['galaxies'].columns]
+
+    if mass_cols: # check these exist
+        data_manager.group_data['galaxies']['mass_total_30kpc'] = data_manager.group_data['galaxies'][mass_cols].sum(axis=1)
+    else:
+        data_manager.group_data['galaxies']['mass_total_30kpc'] = 0.0
 
   if 'local_densities' in to_process:
     calculate_local_densities(data_manager)
