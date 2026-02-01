@@ -193,3 +193,15 @@ def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
   kernel_table = create_kernel_table(fof_LL)
   grouped = fof_halos.groupby(by='HaloID', observed=True)
 
+  galaxies = Parallel(n_jobs=nproc)(delayed(run_fof6d_in_halo)(halo, kernel_table, config['MINIMUM_STARS_PER_GALAXY'], fof_LL, vel_LL) for idx, halo in grouped)
+  galaxies = [galaxy for galaxy_list in galaxies for galaxy in galaxy_list if len(galaxy_list) != 0]
+  
+  for ptype in config['ptypes']:
+    data_manager.data[ptype]['GalID'] = -1
+  
+  for i, galaxy in enumerate(galaxies):
+    for ptype, ptype_indexes in galaxy:
+      data_manager.data[ptype].loc[ptype_indexes, 'GalID'] = i
+
+  for ptype in config['ptypes']:
+    data_manager.data[ptype]['GalID'] = data_manager.data[ptype]['GalID'].astype('category')
