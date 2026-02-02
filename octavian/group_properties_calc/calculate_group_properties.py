@@ -86,7 +86,7 @@ def calculateGroupProperties_common(data_manager: DataManager, group_name: str, 
   group_velocity_columns = ['minpot_vx', 'minpot_vy', 'minpot_vz'] if group_name == 'halos' else [f'vx_{particle_type}', f'vy_{particle_type}', f'vz_{particle_type}']
 
   data[['rel_vx', 'rel_vy', 'rel_vz']] = data[['vx', 'vy', 'vz']] - broadcast_properties(data, group_data, groupID, group_velocity_columns)
-  data['ktot'] = data.eval('0.5 * mass * (rel_vx**2) * (rel_vy**2) * (rel_vz**2)')
+  data['ktot'] = data.eval('0.5 * mass * ((rel_vx**2) + (rel_vy**2) + (rel_vz**2))')
   data.drop(columns=['vx', 'vy', 'vz'], inplace=True)
 
   data[['rel_px', 'rel_py', 'rel_pz']] = data[['rel_vx', 'rel_vy', 'rel_vz']].multiply(data['mass'], axis='index')
