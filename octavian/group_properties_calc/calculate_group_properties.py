@@ -289,10 +289,17 @@ def calculate_aperture_masses(halo: pd.DataFrame, aperture: float, galaxy_positi
 
 
 def calculate_local_densities(data_manager: DataManager) -> None:
+
   config = data_manager.config
   groups = config['groups']
 
   for group in groups:
+
+    # safeguard in case a group is not filled
+    if len(group_data) == 0:
+      print(f"No group data!")
+      continue
+
     group_data = data_manager.group_data[group]
     pos = group_data[['x_total', 'y_total', 'z_total']].to_numpy()
     mass = group_data['mass_total'].to_numpy()
