@@ -295,12 +295,13 @@ def calculate_local_densities(data_manager: DataManager) -> None:
 
   for group in groups:
 
+    group_data = data_manager.group_data[group]
+
     # safeguard in case a group is not filled
     if len(group_data) == 0:
       print(f"No group data!")
       continue
-
-    group_data = data_manager.group_data[group]
+    
     pos = group_data[['x_total', 'y_total', 'z_total']].to_numpy()
     mass = group_data['mass_total'].to_numpy()
 
