@@ -6,11 +6,81 @@ def find_nearest(array, value):
     return array[idx]
 
 def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
+
   with h5py.File(snapfile, 'r') as f:
     for i in range(nsplit):
       with h5py.File(f'{outfile}_{i}.hdf5', 'a') as f_out:
         f.copy(f['Header'], f_out, 'Header')
 
+    #
+    # algorithm to weight split snapshot by star/gas counts
+    #
+    # stars and gas dominate fof6d (stars moreso) so weight the snapshot accordingly
+    #
+
+    ptypes = [group for group in list(f.keys()) if 'HaloID' in list(f[group].keys())] # from Jakub's code
+    # initial star/gas weight dictionaries
+    star_weights = {}
+    gas_weights = {}
+    
+    for ptype_name, weight_dict in [('PartType4', star_weights), ('PartType0', gas_weights)]: # config is not passed so refer to them by PartType
+      ptype_ids = f[ptype_name]['HaloID'][:] # access star/gas particles and their halo IDs
+      ptype_ids = ptype_ids[ptype_ids != 0] # access only the stars/gas in a halo
+      unique, counts = np.unique(ptype_ids, return_counts=True) # find the counts of that particle for a unique halo
+
+      # find a raw weight
+      for hid, count in zip(unique, counts):
+          weight_dict[hid] = count
+
+    weights = {}
+    for hid in set(star_weights) | set(gas_weights): # union operator: find halos in both sets
+        weights[hid] = (star_weights.get(hid, 0))**1.5 + gas_weights.get(hid, 0) # weight stars more heavily
+
+    # account for theoretical pure dark matter halo (these still need to be assigned)
+    # this could maybe be removed
+    all_ids = set()
+    for ptype in ptypes:
+        ptype_ids = f[ptype]['HaloID'][:]
+        all_ids.update(ptype_ids[ptype_ids != 0])
+    for hid in all_ids:
+        weights.setdefault(hid, 0)
+
+    # simple sequential binning algorithm
+    rank_assignments = [set() for _ in range(nsplit)] # initialise a set
+    rank_loads = [0] * nsplit 
+    for hid in sorted(weights, key=weights.get, reverse=True): # sort by heaviest first
+        # we go from heaviest -> lightest, adding the next halo to the bin with the smallest load
+        lightest = np.argmin(rank_loads) # find which rank has the lowest load 
+        rank_assignments[lightest].add(hid)
+        rank_loads[lightest] += weights[hid]
+
+    # and now the actual filter
+    # toss particles not in a halo
+    for ptype in ptypes:
+      datasets = list(f[ptype].keys())
+      ids = f[ptype]['HaloID'][:]
+      in_halo = ids != 0 # find ids not in a halo
+      ids_filtered = ids[in_halo]
+      order = np.argsort(ids_filtered)
+      ids_sorted = ids_filtered[order]
+
+      # Jakub's code masks once per dataset but we could mask once per ptype
+      rank_masks = []
+      for i in range(nsplit):
+          halo_set = np.array(list(rank_assignments[i]))
+          rank_masks.append(np.isin(ids_sorted, halo_set))
+
+      for dataset in datasets:
+          data = f[ptype][dataset][:][in_halo][order]
+          for i in range(nsplit):
+              with h5py.File(f'{outfile}_{i}.hdf5', 'a') as f_out:
+                  f_out.require_group(ptype)
+                  f_out[ptype][dataset] = data[rank_masks[i]]
+
+  # REVIEW 
+
+    """
+    Jakub's code
 
     ptypes = [group for group in list(f.keys()) if 'HaloID' in list(f[group].keys())]
     ids = []
@@ -51,4 +121,5 @@ def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
             f_out.require_group(ptype)
             in_halos = np.logical_and(ids > start, ids <= end)
             f_out[ptype][dataset] = data[in_halos]
+    """
 
