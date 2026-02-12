@@ -39,6 +39,10 @@ def calculateGroupProperties_common(data_manager: DataManager, group_name: str, 
 
   data_grouped = data.groupby(by=groupID, observed=True)
 
+  # parent halo
+  if group_name == 'galaxies':
+    group_data['parent_halo_index'] = data_grouped.head()['HaloID']
+
   # nparticles
   group_data[f'n{particle_type}'] = data_grouped.size()
 
@@ -323,7 +327,6 @@ def calculate_group_properties(data_manager: DataManager) -> None:
 
   groups = config['groups']
 
-  group_props_columns = ['HaloID', 'GalID', 'ptype', 'mass', 'x', 'y', 'z', 'vx', 'vy', 'vz', 'potential']
   columns_to_drop = ['vx', 'vy', 'vz', 'potential']
   to_process = config['to_process']
 

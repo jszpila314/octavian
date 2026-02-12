@@ -1,9 +1,9 @@
 from time import perf_counter
 
 from octavian.data_manager import DataManager, save_group_properties
-from octavian.utils import wrap_positions
+from octavian.utils import wrap_positions, merge_catalogues
 from octavian.halo_finder import run_fof6d
-from octavian.group_properties_calc import calculate_group_properties
+from octavian.group_properties_calc import calculate_group_properties, get_particle_lists
 
 from yaml import safe_load
 
@@ -39,6 +39,12 @@ def run(snapshot: str, outfile: str, configfile: str):
   t1 = perf_counter()
   data_manager.initialise_group_data()
   calculate_group_properties(data_manager)
+  t2 = perf_counter()
+  print(f'Done in {t2-t1:.2f} seconds.')
+
+  print('Assigning particle lists...')
+  t1 = perf_counter()
+  get_particle_lists(data_manager)
   t2 = perf_counter()
   print(f'Done in {t2-t1:.2f} seconds.')
 
