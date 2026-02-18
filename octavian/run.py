@@ -7,42 +7,51 @@ from octavian.group_properties_calc import calculate_group_properties
 
 from yaml import safe_load
 
+import memray
 
-def run(snapshot: str, outfile: str, configfile: str):
+import os
+
+
+def run(snapshot: str, outfile: str, configfile: str, comm=None):
   with open(configfile, 'r') as f:
     config = safe_load(f)
 
   config['Tlim'] = float(config['Tlim'])
 
   t1 = perf_counter()
-  data_manager = DataManager(snapshot, config)
+  data_manager = DataManager(snapshot, config, comm=comm)
   t2 = perf_counter()
   print(f'Done in {t2-t1:.2f} seconds.')
 
-  data_manager.load_halo_ids()
-  data_manager.add_ptype_columns()
+  memray_file = f"memray_rank_{data_manager.rank}.bin"
+  if os.path.exists(memray_file):
+      os.remove(memray_file)
 
-  print('Wrapping positions...')
-  t1 = perf_counter()
-  wrap_positions(data_manager)
-  t2 = perf_counter()
-  print(f'Done in {t2-t1:.2f} seconds.')
+  with memray.Tracker(f"memray_rank_{data_manager.rank}.bin", native_traces=True):
+    data_manager.load_halo_ids()
+    data_manager.add_ptype_columns()
 
-  print('Running FOF6D...')
-  t1 = perf_counter()
-  run_fof6d(data_manager)
-  t2 = perf_counter()
-  print(f'Done in {t2-t1:.2f} seconds.')
+    print('Wrapping positions...')
+    t1 = perf_counter()
+    wrap_positions(data_manager)
+    t2 = perf_counter()
+    print(f'Done in {t2-t1:.2f} seconds.')
 
-  print('Calculating group properties...')
-  t1 = perf_counter()
-  data_manager.initialise_group_data()
-  calculate_group_properties(data_manager)
-  t2 = perf_counter()
-  print(f'Done in {t2-t1:.2f} seconds.')
+    print('Running FOF6D...')
+    t1 = perf_counter()
+    run_fof6d(data_manager, nproc=config.get('nproc', 1))
+    t2 = perf_counter()
+    print(f'Done in {t2-t1:.2f} seconds.')
 
-  print('Saving datasets...')
-  t1 = perf_counter()
-  save_group_properties(data_manager, outfile)
-  t2 = perf_counter()
-  print(f'Done in {t2-t1:.2f} seconds.')
+    print('Calculating group properties...')
+    t1 = perf_counter()
+    data_manager.initialise_group_data()
+    calculate_group_properties(data_manager)
+    t2 = perf_counter()
+    print(f'Done in {t2-t1:.2f} seconds.')
+
+    print('Saving datasets...')
+    t1 = perf_counter()
+    save_group_properties(data_manager, outfile)
+    t2 = perf_counter()
+    print(f'Done in {t2-t1:.2f} seconds.')

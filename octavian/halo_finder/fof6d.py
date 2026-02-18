@@ -9,6 +9,7 @@ import unyt
 from sklearn.neighbors import NearestNeighbors
 from joblib import Parallel, delayed
 
+from time import perf_counter
 
 # get mis for fof6d
 def get_mean_interparticle_separation(data_manager: 'DataManager') -> None:
@@ -57,6 +58,9 @@ def fof_sort_halo(halo: 'pd.DataFrame', minstars: int, fof_LL: float) -> 'pd.Dat
 
   return halo
 
+#
+# helper functions
+#
 
 # kernel table for fof6d velocity criterion distance weights
 def create_kernel_table(fof_LL,ntab=1000):
@@ -70,7 +74,6 @@ def create_kernel_table(fof_LL,ntab=1000):
         else: kerneltab[i] = 1 - 1.5 * q * q * (1 - 0.5 * q)
     return kerneltab
 
-
 # kernel table lookup
 def kernel(r_over_h,kerneltab):
     ntab = len(kerneltab) - 1
@@ -78,31 +81,46 @@ def kernel(r_over_h,kerneltab):
     itab = rtab.astype(int)
     return kerneltab[itab]
 
+#
+# fof6d functions
+#
 
 # fof6d function to apply on groups
 def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: int, fof_LL: float, vel_LL: Optional[float] = None) -> list[list[tuple[int, pd.Index]]]:
+
+  timings = {'n_particles': len(halo)}
   if len(halo) < minstars:
-    return []
+    return [], timings
+  
+  t0 = perf_counter()
 
   # stage 1: directional group find
   halo = fof_sort_halo(halo, minstars, fof_LL)
+  timings['sort'] = perf_counter() - t0
   groups = [halo.loc[halo['GalID'] == id] for id in halo['GalID'].unique()]
 
   if len(groups) == 0:
-    return []
+    return [], timings
 
   # skip stage 2 if vel_LL not defined, all members of a group form a galaxy
   if vel_LL is None:
     galaxies = [[(i, group_ptype.index) for i, group_ptype in group.groupby(by='ptype')] for group in groups]
-    return galaxies
+    return galaxies, timings
   
+  t0 = perf_counter() # reset the clock
   # stage 2: fof6d
+  t_neighbors_tot = 0
+  t_weights_tot = 0
+  t_merge_tot = 0
   new_groups = []
   for group in groups:
+    t1 = perf_counter()
     pos = group[['x', 'y', 'z']].to_numpy()
     neighbors = NearestNeighbors(radius=fof_LL)
     neighbors.fit(pos)
     neighborDistances_lists, index_lists = neighbors.radius_neighbors(pos)
+    t2 = perf_counter()
+    t_neighbors_tot += t2 - t1 # profiling: nearest neighbour speeds
 
     qlists = neighborDistances_lists/fof_LL
     weights = [kernel(qlist, kernel_table) for qlist in qlists]
@@ -111,6 +129,8 @@ def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: in
     dvs = [np.linalg.norm(vel[index_list] - vel[i], axis=1) for i, index_list in enumerate(index_lists)]
 
     sigmas = [np.sqrt(np.sum(weights_i*dvs_i**2)) for weights_i, dvs_i in zip(weights, dvs)]
+    t3 = perf_counter()
+    t_weights_tot += t3 - t2 # profiling: weighting speeds
 
     # this is a graph with defined directional connections from each node (including to self)
     # galaxies = groups formed by disjoint subsets of all points, with at least a one-directional path
@@ -138,6 +158,8 @@ def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: in
           group_galaxies_indexes[merge_with] |= galaxy
 
       if merged == False: group_galaxies_indexes.append(current_indexes)
+    t4 = perf_counter()
+    t_merge_tot += t4 - t3 # profiling: merging (big python loop)
     
     for galaxy in group_galaxies_indexes:
       if len(galaxy) < minstars:
@@ -148,8 +170,14 @@ def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: in
       if len(galaxy.loc[galaxy['ptype'] == 'star']) >= minstars:
         new_groups.append(galaxy)
 
+  # profiling: timings
+  timings['neighbors'] = t_neighbors_tot
+  timings['weights'] = t_weights_tot
+  timings['merge'] = t_merge_tot
+
   galaxies = [[(i, group_ptype.index) for i, group_ptype in group.groupby(by='ptype')] for group in new_groups]
-  return galaxies
+
+  return galaxies, timings
 
 
 # vectorised version of caesar fof6d
@@ -193,8 +221,10 @@ def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
   kernel_table = create_kernel_table(fof_LL)
   grouped = fof_halos.groupby(by='HaloID', observed=True)
 
-  galaxies = Parallel(n_jobs=nproc)(delayed(run_fof6d_in_halo)(halo, kernel_table, config['MINIMUM_STARS_PER_GALAXY'], fof_LL, vel_LL) for idx, halo in grouped)
-  galaxies = [galaxy for galaxy_list in galaxies for galaxy in galaxy_list if len(galaxy_list) != 0]
+  results = Parallel(n_jobs=nproc)(delayed(run_fof6d_in_halo)(halo, kernel_table, config['MINIMUM_STARS_PER_GALAXY'], fof_LL, vel_LL) for idx, halo in grouped)
+  galaxies = [g for gals, _ in results for g in gals if len(gals) != 0]
+  all_timings = [t for _, t in results]
+  timings_df = pd.DataFrame(all_timings)
   
   for ptype in config['ptypes']:
     data_manager.data[ptype]['GalID'] = -1
@@ -205,3 +235,12 @@ def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
 
   for ptype in config['ptypes']:
     data_manager.data[ptype]['GalID'] = data_manager.data[ptype]['GalID'].astype('category')
+
+  print(f"\n=== FOF6D Timing Summary (rank {data_manager.rank}) ===")
+  print(f"Halos processed: {len(timings_df)}")
+  print(f"Total particles: {timings_df['n_particles'].sum()}")
+  print(timings_df[['sort', 'neighbors', 'weights', 'merge']].sum().to_string())
+  print(f"\nTop 5 halos by total time:")
+  timings_df['total'] = timings_df[['sort', 'neighbors', 'weights', 'merge']].sum(axis=1)
+  print(timings_df.nlargest(5, 'total').to_string())
+  print("=" * 40)
