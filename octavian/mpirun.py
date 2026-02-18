@@ -1,10 +1,10 @@
-from mpi4py import MPI
 from octavian.run import run
 
 def mpirun(base_snapshot: str, base_outfile: str, configfile: str):
     """
     Runs Octavian in MPI configuration.
     """
+    from mpi4py import MPI # this has to be inside the function to avoid joblib crashing
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
@@ -16,7 +16,9 @@ def mpirun(base_snapshot: str, base_outfile: str, configfile: str):
     if rank == 0:
         print(f"Running Octavian with {size} nodes.")
 
-    run(snapshot, output, configfile)
+    run(snapshot, output, configfile, comm=comm)
+
+    comm.Barrier()
 
     if rank == 0:
         print(f"All ranks complete.")
