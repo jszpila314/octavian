@@ -175,3 +175,6 @@ code_units:
   sfr: Msun/s
   bhmass: Msun
   bhmdot: Msun/s
+
+# PARALLELISM
+nproc: 1 # cores per node for joblib
