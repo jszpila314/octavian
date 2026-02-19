@@ -10,6 +10,8 @@ from sklearn.neighbors import NearestNeighbors
 from joblib import Parallel, delayed
 
 from time import perf_counter
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
 
 # get mis for fof6d
 def get_mean_interparticle_separation(data_manager: 'DataManager') -> None:
@@ -107,78 +109,85 @@ def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: in
     galaxies = [[(i, group_ptype.index) for i, group_ptype in group.groupby(by='ptype')] for group in groups]
     return galaxies, timings
   
-  t0 = perf_counter() # reset the clock
+
+  #
   # stage 2: fof6d
+  #
+  # updated vectorised loop implementation (JP)
+  #
+
+  # diagnostics
+  t0 = perf_counter() # reset the clock
   t_neighbors_tot = 0
   t_weights_tot = 0
   t_merge_tot = 0
+
   new_groups = []
   for group in groups:
     t1 = perf_counter()
-    pos = group[['x', 'y', 'z']].to_numpy()
+    # NOTE: original implementation of nearestneighbours
+    pos = group[['x', 'y', 'z']].to_numpy() 
     neighbors = NearestNeighbors(radius=fof_LL)
     neighbors.fit(pos)
     neighborDistances_lists, index_lists = neighbors.radius_neighbors(pos)
     t2 = perf_counter()
     t_neighbors_tot += t2 - t1 # profiling: nearest neighbour speeds
-
-    qlists = neighborDistances_lists/fof_LL
-    weights = [kernel(qlist, kernel_table) for qlist in qlists]
-
     vel = group[['vx', 'vy', 'vz']].to_numpy()
-    dvs = [np.linalg.norm(vel[index_list] - vel[i], axis=1) for i, index_list in enumerate(index_lists)]
 
-    sigmas = [np.sqrt(np.sum(weights_i*dvs_i**2)) for weights_i, dvs_i in zip(weights, dvs)]
+    # NOTE: new algorithm using a sparse matrix implementation to avoid expensive python loops and pass code into scipy's C
+    # vectorised COO (COOrdinate) construction (scipy recommended)
+    n = len(group)
+    lengths = np.array([len(il) for il in index_lists])
+    # meet the definition of a sparse matrix
+    # row[i], col[i] = value[i]
+    rows = np.repeat(np.arange(n), lengths) 
+    cols = np.concatenate(index_lists)
+    dists = np.concatenate(neighborDistances_lists)
+
+    # vectorised kernel weights (adapted from Jakub)
+    q = dists / fof_LL
+    w = kernel(q, kernel_table)  # already works on arrays
+
+    # vectorised velocity differences
+    vel_diff = np.linalg.norm(vel[cols] - vel[rows], axis=1)
+
+    # vectorised sigma per particle
+    weighted_dv_sq = w * vel_diff**2 # same as Jakub (I renamed variables for readability)
+    sigmas = np.sqrt(np.bincount(rows, weights=weighted_dv_sq, minlength=n)) 
     t3 = perf_counter()
-    t_weights_tot += t3 - t2 # profiling: weighting speeds
+    t_weights_tot += t3 - t2 # profiling: weighting 
 
-    # this is a graph with defined directional connections from each node (including to self)
-    # galaxies = groups formed by disjoint subsets of all points, with at least a one-directional path
-    valid_neighbor_index_lists = [set(index_list_i[dvs_i <= (vel_LL*sigma)]) for index_list_i, dvs_i, sigma in zip(index_lists, dvs, sigmas)]
+    # vectorised velocity criterion
+    valid = vel_diff <= (vel_LL * sigmas[rows])
 
-    valid_neighbor_index_lists = [each for each in valid_neighbor_index_lists if len(each) > 1]
-    if len(valid_neighbor_index_lists) == 0: continue
+    # build sparse matrix from valid edges only
+    # REVIEW: csr matrices
+    # https://stackoverflow.com/questions/11016256/connected-components-in-a-graph-with-100-million-nodes (the syntax has changed slightly with new scipy versions)
+    adj = csr_matrix((np.ones(valid.sum()), (rows[valid], cols[valid])), shape=(n, n)) # np.ones matrix; boolean mask with rows, cols
+    n_components, labels = connected_components(adj, directed=False) # directed=False means we only care about connections (preserves original logic)
+    del adj # FIXME: not necessary?
 
-    group_galaxies_indexes = [valid_neighbor_index_lists[0]]
-    while len(valid_neighbor_index_lists) != 0:
-      current_indexes = valid_neighbor_index_lists.pop(0)
-      if len(current_indexes) == 0: continue
-
-      merge_with = -1
-      merged = False
-      for i, galaxy in enumerate(group_galaxies_indexes):
-        if current_indexes.isdisjoint(galaxy):
-          continue
-        elif merge_with == -1:
-          galaxy |= current_indexes
-          merge_with = i
-          merged = True
-        else:
-          current_indexes |= group_galaxies_indexes.pop(i)
-          group_galaxies_indexes[merge_with] |= galaxy
-
-      if merged == False: group_galaxies_indexes.append(current_indexes)
     t4 = perf_counter()
-    t_merge_tot += t4 - t3 # profiling: merging (big python loop)
-    
-    for galaxy in group_galaxies_indexes:
-      if len(galaxy) < minstars:
-        continue
-      
-      ordered_indexes = np.sort(list(galaxy))
-      galaxy = group.iloc[ordered_indexes]
-      if len(galaxy.loc[galaxy['ptype'] == 'star']) >= minstars:
-        new_groups.append(galaxy)
+    t_merge_tot += t4 - t3 # profiling: merging (big python loop no more)
+
+    # unavoidable python loop
+    for label in range(n_components):
+        indices = np.where(labels == label)[0]
+        if len(indices) < minstars:
+            continue
+        galaxy = group.iloc[indices]
+        if len(galaxy.loc[galaxy['ptype'] == 'star']) >= minstars:
+            new_groups.append(galaxy)
 
   # profiling: timings
   timings['neighbors'] = t_neighbors_tot
   timings['weights'] = t_weights_tot
   timings['merge'] = t_merge_tot
 
+  # unavoidable python loop
   galaxies = [[(i, group_ptype.index) for i, group_ptype in group.groupby(by='ptype')] for group in new_groups]
 
   return galaxies, timings
-
 
 # vectorised version of caesar fof6d
 def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
