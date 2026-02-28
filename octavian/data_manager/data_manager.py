@@ -34,14 +34,12 @@ class DataManager:
   def initialise_config(self, config: dict) -> None:
     self.config = config
 
-    non_empty_ptypes = []
     with h5py.File(self.snapfile) as f:
-      for ptype in self.config['ptype_names'].values():
-        if len(f[ptype]['HaloID'][:]) != 0: non_empty_ptypes.append(ptype)
+      groups = list(f.keys())
 
     ptypes = []
     for ptype, ptype_name in self.config['ptype_names'].items():
-      if ptype_name in non_empty_ptypes:
+      if ptype_name in groups:
         ptypes.append(ptype)
 
     self.config['ptypes'] = ptypes
