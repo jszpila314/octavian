@@ -29,6 +29,13 @@ def get_id_filter(f: h5py.File, ptypes: list[str], nsplit: int) -> list[list[int
   return id_filter
 
 def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
+  """
+  Weighted snapshot filter.
+
+  This snapshot filter is designed to be weighted towards balancing FOF6D. It does so by applying a 
+  power law to star/gas counts when deciding how to divide the snapshot. FOF6D can take extremely long
+  and ranks can have wildly different runtimes if the snapshot is not weighted when filtered.
+  """
 
   with h5py.File(snapfile, 'r') as f:
     for i in range(nsplit):
@@ -37,8 +44,6 @@ def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
 
     #
     # algorithm to weight split snapshot by star/gas counts
-    #
-    # stars and gas dominate fof6d (stars moreso) so weight the snapshot accordingly
     #
 
     ptypes = [group for group in list(f.keys()) if 'HaloID' in list(f[group].keys())] # from Jakub's code
@@ -105,36 +110,19 @@ def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
                 f_out.require_group(ptype)
                 f_out[ptype][dataset] = data[rank_masks[i]]
 
-  # REVIEW 
+def filter_snapshot_unweighted(snapfile: str, outfile: str, nsplit: int=4):
+  """
+  Filters snapshot simply by number of particles.
 
-    """
-    Jakub's code
+  This can cause load balancing issues:
 
-    ptypes = [group for group in list(f.keys()) if 'HaloID' in list(f[group].keys())]
-    ids = []
-    for ptype in ptypes:
-      ids_ptype = f[ptype]['HaloID'][:]
-      ids.append(ids_ptype[ids_ptype != 0])
+  FOF6D is more sensitive to particle type distributions because it does not care for dark matter particles. 
+  This means that the largest halos by total nparticles are not necessarily the most computationally expensive,
+  meaning you can end up with wildly different FOF6D runtimes across ranks.
 
-    ids = np.sort(np.concatenate(ids))
-    unique_ids, counts = np.unique(ids, return_counts=True)
-    cumulative_counts = np.cumsum(counts)
-    total = len(ids)
+  """
 
-  split_ids = [0]
-  split_fractions = np.linspace(0., 1., nsplit + 1)
-  split_fractions = split_fractions[1:]
-
-  for fraction in split_fractions:
-    fraction_count = total * fraction
-    split_ids.append(unique_ids[(np.abs(cumulative_counts - fraction_count)).argmin()])
-
-  id_filter = list(zip(split_ids[:-1], split_ids[1:]))
-
-  return id_filter
-
-
-def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
+  # original Jakub implemenation
   with h5py.File(snapfile, 'r') as f:
     for i in range(nsplit):
       with h5py.File(f'{outfile}_{i}.hdf5', 'a') as f_out:
@@ -170,5 +158,3 @@ def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
             f_out.require_group(ptype)
             in_halos = np.logical_and(ids > start, ids <= end)
             f_out[ptype][dataset] = data[in_halos]
-    """
-
