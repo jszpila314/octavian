@@ -39,6 +39,10 @@ def calculateGroupProperties_common(data_manager: DataManager, group_name: str, 
 
   data_grouped = data.groupby(by=groupID, observed=True)
 
+  # parent halo
+  if group_name == 'galaxies' and particle_type == 'total':
+    group_data['parent_halo_index'] = np.array(data_grouped[['HaloID', 'GalID']].head(n=1).sort_values('GalID')['HaloID'], dtype='int')
+
   # nparticles
   group_data[f'n{particle_type}'] = data_grouped.size()
 
@@ -331,7 +335,6 @@ def calculate_group_properties(data_manager: DataManager) -> None:
 
   groups = config['groups']
 
-  group_props_columns = ['HaloID', 'GalID', 'ptype', 'mass', 'x', 'y', 'z', 'vx', 'vy', 'vz', 'potential']
   columns_to_drop = ['vx', 'vy', 'vz', 'potential']
   to_process = config['to_process']
 
@@ -417,7 +420,7 @@ def calculate_group_properties(data_manager: DataManager) -> None:
       calculateGroupProperties_bh(data_manager, group)
 
   # aperture
-  if 'apertures' in to_process:
+  if 'apertures' in to_process and 'galaxies' in config['groups']:
     aperture_props_columns = ['HaloID', 'GalID', 'ptype', 'mass', 'x',  'y', 'z']
     data = pd.concat([data_manager.data[ptype][aperture_props_columns] for ptype in config['ptypes']])
 
@@ -440,22 +443,11 @@ def calculate_group_properties(data_manager: DataManager) -> None:
     aperture_masses = data.groupby(by='HaloID').apply(process_halo, include_groups = False).reset_index(names=['HaloID', 'GalID'])
     aperture_masses.set_index('GalID', inplace=True)
 
-    # when we filter the snapshot not all particle types are necessarily present
-    for ptype in ['gas', 'dm', 'star', 'bh', 'HI', 'H2']:
-      col_name = f'mass_{ptype}_30kpc'
-    if ptype in aperture_masses.columns:
-        data_manager.group_data['galaxies'][col_name] = aperture_masses[ptype]
-    else:
-        data_manager.group_data['galaxies'][col_name] = 0.0 # set equal to 0 if it does not exist
-
-    # then we only sum from existing columns to avoid the key error
-    mass_cols = [col for col in ['mass_gas_30kpc', 'mass_dm_30kpc', 'mass_star_30kpc', 'mass_bh_30kpc'] 
-                if col in data_manager.group_data['galaxies'].columns]
-
-    if mass_cols: # check these exist
-        data_manager.group_data['galaxies']['mass_total_30kpc'] = data_manager.group_data['galaxies'][mass_cols].sum(axis=1)
-    else:
-        data_manager.group_data['galaxies']['mass_total_30kpc'] = 0.0
+    for ptype in config['ptypes']:
+      data_manager.group_data['galaxies'][f'mass_{ptype}_30kpc'] = aperture_masses[ptype]
+    data_manager.group_data['galaxies']['mass_HI_30kpc'] = aperture_masses['HI']
+    data_manager.group_data['galaxies']['mass_H2_30kpc'] = aperture_masses['H2']
+    data_manager.group_data['galaxies']['mass_total_30kpc'] = data_manager.group_data['galaxies'][[f'mass_{ptype}_30kpc' for ptype in config['ptypes']]].sum(axis=1)
 
   if 'local_densities' in to_process:
     calculate_local_densities(data_manager)

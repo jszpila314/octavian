@@ -224,7 +224,11 @@ def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
   fof_filter = lambda halo: len(halo) >= config['MINIMUM_STARS_PER_GALAXY']
   fof_halos = data_manager.data['star'].groupby('HaloID', observed=True).filter(fof_filter)
   fof_haloids = np.unique(fof_halos['HaloID'])
-  fof_halos = pd.concat([data_manager.data['gas'].loc[data_manager.data['gas']['dense_gas'], fof_columns], data_manager.data['star'][fof_columns], data_manager.data['bh'][fof_columns]]).query('HaloID in @fof_haloids')
+
+  if 'bh' in config['ptypes']:
+    fof_halos = pd.concat([data_manager.data['gas'].loc[data_manager.data['gas']['dense_gas'], fof_columns], data_manager.data['star'][fof_columns], data_manager.data['bh'][fof_columns]]).query('HaloID in @fof_haloids')
+  else:
+    fof_halos = pd.concat([data_manager.data['gas'].loc[data_manager.data['gas']['dense_gas'], fof_columns], data_manager.data['star'][fof_columns]]).query('HaloID in @fof_haloids')
 
   fof_halos['GalID'] = 0
   kernel_table = create_kernel_table(fof_LL)
@@ -244,6 +248,8 @@ def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
 
   for ptype in config['ptypes']:
     data_manager.data[ptype]['GalID'] = data_manager.data[ptype]['GalID'].astype('category')
+
+  if np.all(data_manager.data['star']['GalID'] == -1): config['groups'] = ['halos']
 
   print(f"\n=== FOF6D Timing Summary (rank {data_manager.rank}) ===")
   print(f"Halos processed: {len(timings_df)}")
