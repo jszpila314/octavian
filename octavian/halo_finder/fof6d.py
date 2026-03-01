@@ -6,10 +6,11 @@ if TYPE_CHECKING:
 import numpy as np
 import pandas as pd
 import unyt
-from sklearn.neighbors import NearestNeighbors
 from joblib import Parallel, delayed
 
 from time import perf_counter
+
+from scipy.spatial import KDTree
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
@@ -89,7 +90,6 @@ def kernel(r_over_h,kerneltab):
 
 # fof6d function to apply on groups
 def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: int, fof_LL: float, vel_LL: Optional[float] = None) -> list[list[tuple[int, pd.Index]]]:
-
   timings = {'n_particles': len(halo)}
   if len(halo) < minstars:
     return [], timings
@@ -125,11 +125,10 @@ def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: in
   new_groups = []
   for group in groups:
     t1 = perf_counter()
-    # NOTE: original implementation of nearestneighbours
+    # NOTE: everything cast to KDTree with scipy functionality
     pos = group[['x', 'y', 'z']].to_numpy() 
-    neighbors = NearestNeighbors(radius=fof_LL)
-    neighbors.fit(pos)
-    neighborDistances_lists, index_lists = neighbors.radius_neighbors(pos)
+    tree = KDTree(pos)
+    sdm = tree.sparse_distance_matrix(tree, fof_LL, output_type='coo_matrix')
     t2 = perf_counter()
     t_neighbors_tot += t2 - t1 # profiling: nearest neighbour speeds
     vel = group[['vx', 'vy', 'vz']].to_numpy()
@@ -137,12 +136,11 @@ def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: in
     # NOTE: new algorithm using a sparse matrix implementation to avoid expensive python loops and pass code into scipy's C
     # vectorised COO (COOrdinate) construction (scipy recommended)
     n = len(group)
-    lengths = np.array([len(il) for il in index_lists])
     # meet the definition of a sparse matrix
     # row[i], col[i] = value[i]
-    rows = np.repeat(np.arange(n), lengths) 
-    cols = np.concatenate(index_lists)
-    dists = np.concatenate(neighborDistances_lists)
+    rows = sdm.row
+    cols = sdm.col
+    dists = sdm.data
 
     # vectorised kernel weights (adapted from Jakub)
     q = dists / fof_LL
@@ -165,7 +163,6 @@ def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: in
     # https://stackoverflow.com/questions/11016256/connected-components-in-a-graph-with-100-million-nodes (the syntax has changed slightly with new scipy versions)
     adj = csr_matrix((np.ones(valid.sum()), (rows[valid], cols[valid])), shape=(n, n)) # np.ones matrix; boolean mask with rows, cols
     n_components, labels = connected_components(adj, directed=False) # directed=False means we only care about connections (preserves original logic)
-    del adj # FIXME: not necessary?
 
     t4 = perf_counter()
     t_merge_tot += t4 - t3 # profiling: merging (big python loop no more)
@@ -223,7 +220,7 @@ def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
   fof_columns = ['HaloID', 'x', 'y', 'z', 'vx', 'vy', 'vz', 'ptype']
   fof_filter = lambda halo: len(halo) >= config['MINIMUM_STARS_PER_GALAXY']
   fof_halos = data_manager.data['star'].groupby('HaloID', observed=True).filter(fof_filter)
-  fof_haloids = np.unique(fof_halos['HaloID'])
+  fof_haloids = np.unique(fof_halos['HaloID']) #  REVIEW:
 
   if 'bh' in config['ptypes']:
     fof_halos = pd.concat([data_manager.data['gas'].loc[data_manager.data['gas']['dense_gas'], fof_columns], data_manager.data['star'][fof_columns], data_manager.data['bh'][fof_columns]]).query('HaloID in @fof_haloids')
