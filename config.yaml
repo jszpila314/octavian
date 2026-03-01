@@ -32,10 +32,6 @@ prop_aliases:
 dataset_columns:
   groupID: 'HaloID'
   groupID: 'GalID'
-  glist: glist
-  dmlist: dmlist
-  slist: slist
-  bhlist: bhlist
   parent_halo_index: 'parent_halo_index'
   ngas: 'ngas'
   nstar: 'nstar'

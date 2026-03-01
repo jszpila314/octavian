@@ -44,7 +44,8 @@ def merge_catalogues(files: list[str], outfile: str, configfile: str) -> None:
 
     for dataset in config['dataset_columns'].keys():
       print(dataset)
-      if 'list' in dataset or 'groupID' in dataset or 'parent_halo_index' in dataset: continue
+      if 'groupID' in dataset or 'parent_halo_index' in dataset: continue
+      if dataset in ['glist', 'slist', 'dmlist', 'bhlist']: continue # old code guard
       halo_data = []
       galaxy_data = []
       for file in files:
@@ -68,5 +69,35 @@ def merge_catalogues(files: list[str], outfile: str, configfile: str) -> None:
     galaxy_group['GalID'] = np.arange(np.sum(list(file_lengths['galaxies'].values())))
     galaxy_group['parent_halo_index'] = galaxy_parent_halo
     
+    ptype_lists = ['glist', 'slist', 'dmlist', 'bhlist']
+    for ptype_list in ptype_lists:
+      for group_key, out_group in [('halo_data', halo_group), ('galaxy_data', galaxy_group)]:
+        all_indices = []
+        all_lengths = []
+        for file in files:
+          with h5py.File(file, 'r') as f_in:
+            try:
+              all_indices.append(f_in[group_key][f'{ptype_list}_indices'][:])
+              all_lengths.append(f_in[group_key][f'{ptype_list}_lengths'][:])
+            except KeyError:
+              continue
+
+        if not all_indices:
+          continue
+
+        # reorder by the sort order computed earlier
+        order = halo_order if group_key == 'halo_data' else galaxy_order
+        merged_lengths = np.concatenate(all_lengths)[order]
+        merged_offsets = np.concatenate([[0], np.cumsum(merged_lengths[:-1])]).astype('int64')
+
+        # reorder indices to match
+        old_lengths = np.concatenate(all_lengths)
+        old_offsets = np.concatenate([[0], np.cumsum(old_lengths[:-1])]).astype('int64')
+        all_flat = np.concatenate(all_indices)
+        reordered = np.concatenate([all_flat[old_offsets[i]:old_offsets[i]+old_lengths[i]] for i in order])
+
+        out_group.create_dataset(f'{ptype_list}_indices', data=reordered, compression=1)
+        out_group.create_dataset(f'{ptype_list}_offsets', data=merged_offsets, compression=1)
+        out_group.create_dataset(f'{ptype_list}_lengths', data=merged_lengths, compression=1)
 
 
