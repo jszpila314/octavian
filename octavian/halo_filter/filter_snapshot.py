@@ -37,21 +37,30 @@ def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
   and ranks can have wildly different runtimes if the snapshot is not weighted when filtered.
   """
 
+  # these are weighting constants. cgp scales better than fof6d so ideally lean towards fof6d
+  ALPHA = 0.6 # arbitrary fof6d constant
+  BETA = 0.4 # arbitrary cgp constant
+
   with h5py.File(snapfile, 'r') as f:
     for i in range(nsplit):
       with h5py.File(f'{outfile}_{i}.hdf5', 'a') as f_out:
         f.copy(f['Header'], f_out, 'Header')
 
     #
-    # algorithm to weight split snapshot by star/gas counts
+    # algorithm to weight split snapshot
     #
 
     ptypes = [group for group in list(f.keys()) if 'HaloID' in list(f[group].keys())] # from Jakub's code
-    # initial star/gas weight dictionaries
+    # initialise weight dictionaries
     star_weights = {}
     gas_weights = {}
+    dm_weights = {} 
     
-    for ptype_name, weight_dict in [('PartType4', star_weights), ('PartType0', gas_weights)]: # config is not passed so refer to them by PartType
+    for ptype_name, weight_dict in [
+    ('PartType4', star_weights),
+    ('PartType0', gas_weights),
+    ('PartType1', dm_weights),  
+    ]: # config is not passed so refer to them by PartType
       ptype_ids = f[ptype_name]['HaloID'][:] # access star/gas particles and their halo IDs
       ptype_ids = ptype_ids[ptype_ids != 0] # access only the stars/gas in a halo
       unique, counts = np.unique(ptype_ids, return_counts=True) # find the counts of that particle for a unique halo
@@ -61,8 +70,11 @@ def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
           weight_dict[hid] = count
 
     weights = {}
-    for hid in set(star_weights) | set(gas_weights): # union operator: find halos in both sets
-        weights[hid] = (star_weights.get(hid, 0))**1.5 + gas_weights.get(hid, 0) # weight stars more heavily
+    for hid in set(star_weights) | set(gas_weights) | set(dm_weights): # union operator: find halos in both sets
+      n_total = star_weights.get(hid, 0) + gas_weights.get(hid, 0) + dm_weights.get(hid, 0)
+      fof6d_cost = (star_weights.get(hid, 0))**1.2 + gas_weights.get(hid, 0)
+      cgp_cost = n_total  # roughly linear in total particles per halo
+      weights[hid] = ALPHA * fof6d_cost + BETA * cgp_cost
 
     # account for theoretical pure dark matter halo (these still need to be assigned)
     # this could maybe be removed
