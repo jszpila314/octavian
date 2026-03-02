@@ -10,13 +10,25 @@ from sklearn.neighbors import NearestNeighbors
 from functools import partial
 from astropy import constants as const
 
+from scipy.spatial import KDTree
+
 # Suppress pandas fragmented frame performance warnings (superfluous)  https://stackoverflow.com/a/76306267
 import warnings
 warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
 
+def _get_group_idx(data: pd.DataFrame, group_data: pd.DataFrame, groupID: str) -> np.ndarray:
+  """
+  This is more to future-proof things. If data gets reindexed or modified, this should handle things.
+  """
+  return group_data.index.get_indexer(data[groupID])
 
-def broadcast_properties(data: pd.DataFrame, group_data: pd.DataFrame, groupID: str, properties: list[str] | str) -> np.ndarray:
-  return data[[groupID]].merge(group_data[properties], left_on=groupID, right_index=True)[properties].to_numpy()
+def broadcast_properties(data: pd.DataFrame, group_data: pd.DataFrame, groupID: str, properties: list[str] | str, group_idx: np.ndarray = None) -> np.ndarray:
+  """
+  Broadcasts required properties as a numpy array.
+  """
+  if group_idx is None:
+    group_idx = _get_group_idx(data, group_data, groupID)
+  return group_data[properties].to_numpy()[group_idx]
 
 
 def calculateGroupProperties_common(data_manager: DataManager, group_name: str, particle_type: str) -> None:
@@ -38,6 +50,8 @@ def calculateGroupProperties_common(data_manager: DataManager, group_name: str, 
   groupID = config['groupIDs'][group_name]
 
   data_grouped = data.groupby(by=groupID, observed=True)
+  # NOTE: if you were to filter data after this step you would want to recompute this (seen later)
+  group_idx = group_data.index.get_indexer(data[groupID])
 
   # parent halo
   if group_name == 'galaxies' and particle_type == 'total':
@@ -70,7 +84,7 @@ def calculateGroupProperties_common(data_manager: DataManager, group_name: str, 
 
   # velocity dispersion
   group_velocity_columns = [f'vx_{particle_type}', f'vy_{particle_type}', f'vz_{particle_type}']
-  data[['rel_vx', 'rel_vy', 'rel_vz']] = data[['vx', 'vy', 'vz']] - broadcast_properties(data, group_data, groupID, group_velocity_columns)
+  data[['rel_vx', 'rel_vy', 'rel_vz']] = data[['vx', 'vy', 'vz']] - broadcast_properties(data, group_data, groupID, group_velocity_columns, group_idx)
 
   data[f'velocity_dispersion'] = np.sum(data[['rel_vx', 'rel_vy', 'rel_vz']]**2, axis=1)
   group_data[f'velocity_dispersion_{particle_type}'] = np.sqrt(data_grouped['velocity_dispersion'].sum() / group_data[f'n{particle_type}'])
@@ -81,7 +95,7 @@ def calculateGroupProperties_common(data_manager: DataManager, group_name: str, 
   # radius
   group_position_columns = ['minpot_x', 'minpot_y', 'minpot_z'] if group_name == 'halos' else [f'x_{particle_type}', f'y_{particle_type}', f'z_{particle_type}']
                                                                                                
-  data[['rel_x', 'rel_y', 'rel_z']] = data[['x', 'y', 'z']] - broadcast_properties(data, group_data, groupID, group_position_columns)
+  data[['rel_x', 'rel_y', 'rel_z']] = data[['x', 'y', 'z']] - broadcast_properties(data, group_data, groupID, group_position_columns, group_idx)
   data.drop(columns=['x', 'y', 'z'], inplace=True)
   data['radius'] = np.linalg.norm(data[['rel_x', 'rel_y', 'rel_z']], axis=1)
 
@@ -89,7 +103,7 @@ def calculateGroupProperties_common(data_manager: DataManager, group_name: str, 
   # angular momentum
   group_velocity_columns = ['minpot_vx', 'minpot_vy', 'minpot_vz'] if group_name == 'halos' else [f'vx_{particle_type}', f'vy_{particle_type}', f'vz_{particle_type}']
 
-  data[['rel_vx', 'rel_vy', 'rel_vz']] = data[['vx', 'vy', 'vz']] - broadcast_properties(data, group_data, groupID, group_velocity_columns)
+  data[['rel_vx', 'rel_vy', 'rel_vz']] = data[['vx', 'vy', 'vz']] - broadcast_properties(data, group_data, groupID, group_velocity_columns, group_idx)
   data['ktot'] = data.eval('0.5 * mass * ((rel_vx**2) + (rel_vy**2) + (rel_vz**2))')
   data.drop(columns=['vx', 'vy', 'vz'], inplace=True)
 
@@ -102,7 +116,7 @@ def calculateGroupProperties_common(data_manager: DataManager, group_name: str, 
   data.drop(columns=['rel_px', 'rel_py', 'rel_pz'], inplace=True)
 
   angular_momentum_columns = [f'Lx_{particle_type}', f'Ly_{particle_type}', f'Lz_{particle_type}']
-  data[['Lx_group', 'Ly_group', 'Lz_group']] = broadcast_properties(data, group_data, groupID, angular_momentum_columns)
+  data[['Lx_group', 'Ly_group', 'Lz_group']] = broadcast_properties(data, group_data, groupID, angular_momentum_columns, group_idx)
   data['L_dot_L_group'] = data.eval('Lx * Lx_group + Ly * Ly_group + Lz * Lz_group')
   data.drop(columns=['Lx', 'Ly', 'Lz'], inplace=True)
 
@@ -131,15 +145,15 @@ def calculateGroupProperties_common(data_manager: DataManager, group_name: str, 
   # radial quantities
   data.sort_values(by='radius', inplace=True)
   data_grouped = data.groupby(by='HaloID', observed=True)
+  group_idx = group_data.index.get_indexer(data[groupID])
 
   data['cumulative_mass'] = data_grouped['mass'].cumsum()
-  data['cumulative_mass_fraction'] = data['cumulative_mass'] / broadcast_properties(data, group_data, groupID, f'mass_{particle_type}')
+  data['cumulative_mass_fraction'] = data['cumulative_mass'] / broadcast_properties(data, group_data, groupID, f'mass_{particle_type}', group_idx)
 
   for quantile, col_name in zip([0.2, 0.5, 0.8], ['r20', 'half_mass', 'r80']):
-    data.loc[data['cumulative_mass_fraction'] < quantile, 'cumulative_mass_fraction'] = np.nan
-    minimum_cummass_index = data_grouped['cumulative_mass_fraction'].idxmin(skipna=True)
-    group_data[f'radius_{particle_type}_{col_name}'] = data.loc[minimum_cummass_index, [groupID, 'radius']].set_index(groupID)
-
+      data.loc[data['cumulative_mass_fraction'] < quantile, 'cumulative_mass_fraction'] = np.nan
+      minimum_cummass_index = data_grouped['cumulative_mass_fraction'].idxmin(skipna=True)
+      group_data[f'radius_{particle_type}_{col_name}'] = data.loc[minimum_cummass_index, [groupID, 'radius']].set_index(groupID)
 
   # virial quantities -> around minpotpos
   if group_name == 'halos' and particle_type == 'total':
@@ -298,34 +312,26 @@ def calculate_local_densities(data_manager: DataManager) -> None:
   groups = config['groups']
 
   for group in groups:
-
     group_data = data_manager.group_data[group]
 
-    # safeguard in case a group is not filled
     if len(group_data) == 0:
       print(f"No group data!")
       continue
-    
+
     pos = group_data[['x_total', 'y_total', 'z_total']].to_numpy()
     mass = group_data['mass_total'].to_numpy()
 
-    neighbors = NearestNeighbors()
-    neighbors.fit(pos)
-
+    # REVIEW: moving a FOF6D optimisation into this function
+    # previously the pandas .explode() calls were memory-intensive
+    tree = KDTree(pos)
     for radius in [300., 1000., 3000.]:
       volume = 4./3. * np.pi * radius**3
+      index_lists = tree.query_ball_point(pos, radius, workers=-1) # workers=-1 means all processors are used (from documentation)
+      mass_sums = np.array([mass[il].sum() for il in index_lists])
+      counts = np.array([len(il) for il in index_lists])
 
-      df = pd.DataFrame({
-        'indexes': neighbors.radius_neighbors(pos, radius=radius, return_distance=False)
-      })
-
-      df = df.explode('indexes').dropna()
-
-      df['mass'] = mass[df['indexes'].astype('int')]
-      grouped = df.groupby(level=0)
-
-      group_data[f'local_mass_density_{int(radius)}'] = grouped['mass'].sum() / volume
-      group_data[f'local_number_density_{int(radius)}'] = grouped.size() / volume
+      group_data[f'local_mass_density_{int(radius)}'] = mass_sums / volume
+      group_data[f'local_number_density_{int(radius)}'] = counts / volume
 
 
 def calculate_group_properties(data_manager: DataManager) -> None:
