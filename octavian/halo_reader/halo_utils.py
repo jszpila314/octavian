@@ -2,8 +2,12 @@
 
 Here you will find the halo data management classes.
 
+HaloReader ties the whole thing together. It is an agnostic class which handles all the data management
+from a specified halo finder. The goal of the halo-finder-specific files is to then translate their outputs
+into the format this class expects.
+
 HaloTree provides the framework for storing substructure (subhalos, sub-subhalos, etc.) that come from
-halo finders such as AHF and HBT+. It is useful to do this thoroughly for things lie progenitors, and
+halo finders such as AHF and HBT+. It is useful to do this thoroughly for things like progenitors, and
 because it allows us to capture more science data rather than tossing everything.
 
 HaloMembership characterises the existing halos.
@@ -12,12 +16,111 @@ I think OOP is good here because bespoke halo readers can use inheritance.
 
 """
 
+from __future__ import annotations
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from octavian.data_manager import DataManager
+
 import numpy as np
+import pandas as pd
 from numba import njit
+
 
 # the readers extract Octavian-compatible particles
 # {'gas': 0, 'dm': 1, 'star': 2, 'bh': 3} is our convention for what readers must return
 # readers must also align halo IDs so they read 0, 1, 2 etc.
+
+# easier to work with integers than strings
+PTYPE_ENCODE = {'gas': 0, 'dm': 1, 'star': 2, 'bh': 3}
+PTYPE_DECODE = {i: j for j, i in PTYPE_ENCODE.items()} # the inverse operation
+
+class HaloReader:
+    """
+    Base class for external halo finder integration.
+    
+    Subclasses use read() to parse their specific file formats.
+
+    This class handles remapping, tree construction, snapshot matching, 
+    and DataManager assignment for Octavian-friendly analysis.
+    """
+
+    def __init__(self, data_manager: DataManager):
+        self.dm = data_manager
+        self.tree = None
+        self.membership = None
+
+    def remap_ids(self, halo_ids, parent_ids, member_hids):
+        """
+        Map halo-finder-specific IDs to an agnostic 0, 1, 2 (speeds up agnostic classes, easier to work with).
+        """
+        unique_raw = np.unique(halo_ids)
+        raw_to_new = np.full(unique_raw.max() + 1, -1, dtype=np.int64)
+        raw_to_new[unique_raw] = np.arange(len(unique_raw))
+
+        new_halo_ids = raw_to_new[halo_ids]
+
+        # parents: map known IDs, anything else is -1 as is Octavian tradition
+        new_parent_ids = np.full_like(parent_ids, -1)
+        valid_parents = parent_ids != -1 
+        parent_in_range = valid_parents & (parent_ids <= unique_raw.max())
+        mapped = raw_to_new[parent_ids[parent_in_range]]
+        # only assign if the parent actually exists in our halo list
+        new_parent_ids[parent_in_range] = np.where(mapped != -1, mapped, -1)
+
+        # membership particle halo IDs
+        new_member_hids = raw_to_new[member_hids]
+
+        return new_halo_ids, new_parent_ids, new_member_hids
+
+    def assign(self, membership, mode):
+        """
+        Resolve memberships, match to snapshot, assign HaloIDs.
+        """
+        pids, ptypes, hids = membership.branch_membership(mode=mode)
+
+        config = self.dm.config
+
+        for ptype in config['ptypes']:
+            ptype_code = PTYPE_ENCODE.get(ptype)
+            if ptype_code is None:
+                continue
+
+            # filter to this ptype
+            mask = ptypes == ptype_code
+            if not np.any(mask):
+                self.dm.data[ptype]['HaloID'] = pd.Series(
+                    np.full(len(self.dm.data[ptype]), -1, dtype=np.int64), 
+                    dtype='category'
+                )
+                continue
+
+            ext_pids = pids[mask]
+            ext_hids = hids[mask]
+
+            self.match_ptype(ptype, ext_pids, ext_hids)
+
+    def match_ptype(self, ptype, ext_pids, ext_hids):
+        """
+        Searchsorted matching of external particle IDs against snapshot.
+        """
+        self.dm.load_property('pid', ptype)
+        snap_pids = self.dm.data[ptype]['pid'].to_numpy(dtype=np.int64)
+
+        # sort external for searchsorted
+        order = np.argsort(ext_pids)
+        sorted_pids = ext_pids[order]
+        sorted_hids = ext_hids[order]
+
+        # match
+        positions = np.searchsorted(sorted_pids, snap_pids)
+        positions = np.clip(positions, 0, len(sorted_pids) - 1)
+        matched = sorted_pids[positions] == snap_pids
+
+        # assign — unmatched particles get -1
+        halo_ids = np.full(len(snap_pids), -1, dtype=np.int64)
+        halo_ids[matched] = sorted_hids[positions[matched]]
+
+        self.dm.data[ptype]['HaloID'] = pd.Series(halo_ids, dtype='category')
 
 class HaloTree:
     """
