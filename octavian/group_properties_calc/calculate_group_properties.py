@@ -9,8 +9,16 @@ import unyt
 from sklearn.neighbors import NearestNeighbors
 from functools import partial
 from astropy import constants as const
+from time import perf_counter
 
 from scipy.spatial import KDTree
+
+from octavian.group_properties_calc.group_computations import (
+    compute_angular_momentum,
+    compute_rotation_quantities,
+    compute_radial_quantiles,
+    compute_virial_quantities,
+)
 
 # Suppress pandas fragmented frame performance warnings (superfluous)  https://stackoverflow.com/a/76306267
 import warnings
@@ -101,59 +109,50 @@ def calculateGroupProperties_common(data_manager: DataManager, group_name: str, 
 
 
   # angular momentum
+  t1 = perf_counter()
   group_velocity_columns = ['minpot_vx', 'minpot_vy', 'minpot_vz'] if group_name == 'halos' else [f'vx_{particle_type}', f'vy_{particle_type}', f'vz_{particle_type}']
 
-  data[['rel_vx', 'rel_vy', 'rel_vz']] = data[['vx', 'vy', 'vz']] - broadcast_properties(data, group_data, groupID, group_velocity_columns, group_idx)
-  data['ktot'] = data.eval('0.5 * mass * ((rel_vx**2) + (rel_vy**2) + (rel_vz**2))')
+  pos_rel = data[['rel_x', 'rel_y', 'rel_z']].to_numpy()
+  vel_rel = data[['vx', 'vy', 'vz']].to_numpy() - broadcast_properties(data, group_data, groupID, group_velocity_columns, group_idx)
+  mass_arr = data['mass'].to_numpy()
   data.drop(columns=['vx', 'vy', 'vz'], inplace=True)
 
-  data[['rel_px', 'rel_py', 'rel_pz']] = data[['rel_vx', 'rel_vy', 'rel_vz']].multiply(data['mass'], axis='index')
-  data.drop(columns=['rel_vx', 'rel_vy', 'rel_vz'], inplace=True)
+  L, ktot_sum = compute_angular_momentum(pos_rel, vel_rel, mass_arr, group_idx, len(group_data))
 
-  data[['Lx', 'Ly', 'Lz']] = np.cross(data[['rel_x', 'rel_y', 'rel_z']], data[['rel_px', 'rel_py', 'rel_pz']])
-  for direction in ['x', 'y', 'z']:
-    group_data[f'L{direction}_{particle_type}'] = data_grouped[f'L{direction}'].sum()
-  data.drop(columns=['rel_px', 'rel_py', 'rel_pz'], inplace=True)
+  for i, d in enumerate(['x', 'y', 'z']):
+    group_data[f'L{d}_{particle_type}'] = L[:, i]
 
-  angular_momentum_columns = [f'Lx_{particle_type}', f'Ly_{particle_type}', f'Lz_{particle_type}']
-  data[['Lx_group', 'Ly_group', 'Lz_group']] = broadcast_properties(data, group_data, groupID, angular_momentum_columns, group_idx)
-  data['L_dot_L_group'] = data.eval('Lx * Lx_group + Ly * Ly_group + Lz * Lz_group')
-  data.drop(columns=['Lx', 'Ly', 'Lz'], inplace=True)
+  L_mag = np.linalg.norm(L, axis=1)
+  group_data[f'L_{particle_type}'] = L_mag
+  group_data[f'ALPHA_{particle_type}'] = np.arctan2(L[:, 1], L[:, 2])
+  group_data[f'BETA_{particle_type}'] = np.arcsin(L[:, 0] / L_mag)
 
-  group_data[f'L_{particle_type}'] = np.linalg.norm(group_data[[f'Lx_{particle_type}', f'Ly_{particle_type}', f'Lz_{particle_type}']], axis=1)
-  group_data[f'ALPHA_{particle_type}'] = np.arctan2(group_data[f'Ly_{particle_type}'], group_data[f'Lz_{particle_type}'])
-  group_data[f'BETA_{particle_type}'] = np.arcsin(group_data[f'Lx_{particle_type}'] / group_data[f'L_{particle_type}'])
+  counter_mass, krot_sum, ktot_sum = compute_rotation_quantities(pos_rel, vel_rel, mass_arr, group_idx, L, len(group_data))
+  t2 = perf_counter()
+  print(f'Angular momentum + rotation: {t2-t1:.2f}s ({particle_type}, {group_name})')
 
-  group_data[f'BoverT_{particle_type}'] = 2 * data.loc[data['L_dot_L_group'] < 0].groupby(by='HaloID', observed=True)['mass'].sum() / group_data[f'mass_{particle_type}']
-
-
-  # rotation quantities
-  data['rz'] = data.eval('sqrt((rel_y * Lz_group - rel_z * Ly_group)**2 + (rel_z * Lx_group - rel_x * Lz_group)**2 + (rel_x * Ly_group - rel_y * Lx_group)**2)')
-  data.drop(columns=['rel_x', 'rel_y', 'rel_z', 'Lx_group', 'Ly_group', 'Lz_group'], inplace=True)
-  
-  data['krot'] = data.eval('(0.5 * (L_dot_L_group / rz)**2) * mass**(-1)') # for some reason, '/ mass' breaks due to forbidden control characters, no clue
-
-  ordered_rotation_grouped = data.loc[data['rz'] > 0, ['HaloID', 'krot', 'ktot']].groupby(by='HaloID', observed=True)
-  group_data[f'kappa_rot_{particle_type}'] = ordered_rotation_grouped['krot'].sum() / ordered_rotation_grouped['ktot'].sum()
-
-  data.drop(columns=['L_dot_L_group', 'rz', 'krot', 'ktot'], inplace=True)
+  group_data[f'BoverT_{particle_type}'] = 2 * counter_mass / group_data[f'mass_{particle_type}']
+  group_data[f'kappa_rot_{particle_type}'] = krot_sum / ktot_sum
+  data.drop(columns=['rel_x', 'rel_y', 'rel_z'], inplace=True)
 
   angular_quantities = [f'velocity_dispersion_{particle_type}', f'Lx_{particle_type}', f'Ly_{particle_type}', f'Lz_{particle_type}', f'BoverT_{particle_type}', f'kappa_rot_{particle_type}']
   group_data.loc[group_data[f'n{particle_type}'] < 3, angular_quantities] = 0.
 
-
   # radial quantities
+  t1 = perf_counter()
   data.sort_values(by='radius', inplace=True)
-  data_grouped = data.groupby(by='HaloID', observed=True)
-  group_idx = group_data.index.get_indexer(data[groupID])
+  group_idx = group_data.index.get_indexer(data[groupID])  # recompute after sort
 
-  data['cumulative_mass'] = data_grouped['mass'].cumsum()
-  data['cumulative_mass_fraction'] = data['cumulative_mass'] / broadcast_properties(data, group_data, groupID, f'mass_{particle_type}', group_idx)
+  radii = data['radius'].to_numpy()
+  mass_sorted = data['mass'].to_numpy()
+  quantiles = np.array([0.2, 0.5, 0.8])
+  quantile_names = ['r20', 'half_mass', 'r80']
 
-  for quantile, col_name in zip([0.2, 0.5, 0.8], ['r20', 'half_mass', 'r80']):
-      data.loc[data['cumulative_mass_fraction'] < quantile, 'cumulative_mass_fraction'] = np.nan
-      minimum_cummass_index = data_grouped['cumulative_mass_fraction'].idxmin(skipna=True)
-      group_data[f'radius_{particle_type}_{col_name}'] = data.loc[minimum_cummass_index, [groupID, 'radius']].set_index(groupID)
+  radial_results = compute_radial_quantiles(radii, mass_sorted, group_idx, len(group_data), quantiles)
+  t2 = perf_counter() 
+  print(f'Radial quantiles: {t2-t1:.2f}s ({particle_type}, {group_name})')
+  for q, col_name in enumerate(quantile_names):
+    group_data[f'radius_{particle_type}_{col_name}'] = radial_results[:, q]
 
   # virial quantities -> around minpotpos
   if group_name == 'halos' and particle_type == 'total':
@@ -162,14 +161,14 @@ def calculateGroupProperties_common(data_manager: DataManager, group_name: str, 
     group_data['temperature'] = 3.6e5 * (group_data['circular_velocity'] / 100.0)**2
     group_data['spin_param'] = group_data[f'L_{particle_type}'] / (np.sqrt(2) * group_data[f'mass_{particle_type}'] * group_data['circular_velocity'] * group_data['r200'])
 
-    volume_factor = 4./3.*np.pi
     rhocrit = (data_manager.simulation['rhocrit'] * data_manager.create_unit_quantity('rhocrit')).to('Msun / (kpc*a)**3').d
-    data['overdensity'] = data['cumulative_mass'] / (volume_factor * data['radius']**3) / rhocrit
+    factors = np.array([200., 500., 2500.])
 
-    for factor in [200, 500, 2500]:
-      data.loc[data['overdensity'] < factor, ['radius', 'cumulative_mass']] = np.nan
-      group_data[f'radius_{factor}_c'] = data_grouped['radius'].last()
-      group_data[f'mass_{factor}_c'] = data_grouped['cumulative_mass'].last()
+    virial_r, virial_m = compute_virial_quantities(radii, mass_sorted, group_idx, len(group_data), rhocrit, factors)
+
+    for f, factor in enumerate([200, 500, 2500]):
+      group_data[f'radius_{factor}_c'] = virial_r[:, f]
+      group_data[f'mass_{factor}_c'] = virial_m[:, f]
 
 
 def calculateGroupProperties_gas(data_manager: DataManager, group_name: str) -> None:
@@ -287,7 +286,6 @@ def calculateGroupProperties_bh(data_manager: DataManager, group_name: str) -> N
   FRAD = 0.1  # assume 10% radiative efficiency
   edd_factor = (4 * np.pi * const.G * const.m_p / (FRAD * const.c * const.sigma_T)).to('1/yr').value
   group_data['bh_fedd'] = data['bhmdot'] / (edd_factor * data['mass'])
-
 
 def calculate_aperture_masses(halo: pd.DataFrame, aperture: float, galaxy_positions: np.ndarray) -> pd.DataFrame:
   galaxy_ids = halo['GalID'].unique()
