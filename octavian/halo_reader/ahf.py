@@ -14,15 +14,17 @@ from typing import Dict, Optional, Tuple, TYPE_CHECKING
 if TYPE_CHECKING:
     from octavian.data_manager import DataManager
 
+import ctypes # for accelerated reading
 import gzip
 from pathlib import Path
 from time import perf_counter
 
 import numpy as np
 import pandas as pd
-import polars as pl
 
 from octavian.halo_reader.halo_utils import HaloMembership, HaloReader, HaloTree
+
+print(f"Imports successful.")
 
 # AHF assigns ptype codes, we change these to ptype names for Octavian compatibility
 _PTYPE_MAP = {0: 0, # gas
@@ -47,11 +49,13 @@ def read_ahf_halos(path: Path) -> Tuple[pd.DataFrame, Dict[int, int]]:
     with _open_catalog(path) as f:
         header_line = f.readline().strip().lstrip('#').split() # strip the #
 
+    clean_headers = [h.split('(')[0] for h in header_line] # AHF adds numbering so strip this too
+
     # whitespace-delimited rows
     # NOTE: only pandas can handle this (at present March 2026)
-    df = pd.read_csv(path, comment='#', delim_whitespace=True, names=header_line)
+    df = pd.read_csv(path, comment='#', delim_whitespace=True, names=clean_headers)
 
-    return pl.from_pandas(df) # convert to polars
+    return df # convert to polars
 
 # previously defined as two functions: now convolved
 def read_ahf_particles(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -112,6 +116,51 @@ def read_ahf_particles(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
 
     return out_hids[:idx].copy(), out_pids[:idx].copy(), out_ptypes[:idx].copy()
 
+def read_ahf_particles_c(filepath, n_estimate=None):
+    """
+    C-accelerated AHF particle parser.
+    Requires ahf_parser.so to be compiled in the same directory.
+    """
+    import ctypes
+    
+    so_path = Path(__file__).parent / 'ahf_parser.so'
+    if not so_path.exists():
+        raise FileNotFoundError(f'Compiled parser not found at {so_path}. Compile with: gcc -O2 -shared -fPIC -o ahf_parser.so ahf_parser.c')
+    
+    lib = ctypes.CDLL(str(so_path))
+    lib.parse_ahf_particles.restype = ctypes.c_long
+    
+    filepath = Path(filepath)
+    if n_estimate is None:
+        n_estimate = filepath.stat().st_size // 8
+    
+    out_hids = np.empty(n_estimate, dtype=np.int64)
+    out_pids = np.empty(n_estimate, dtype=np.int64)
+    out_ptypes = np.empty(n_estimate, dtype=np.int8)
+    valid_ptypes = np.array([0, 1, 4, 5], dtype=np.int32)
+    
+    n = lib.parse_ahf_particles(
+        str(filepath).encode(),
+        out_hids.ctypes.data_as(ctypes.POINTER(ctypes.c_long)),
+        out_pids.ctypes.data_as(ctypes.POINTER(ctypes.c_long)),
+        out_ptypes.ctypes.data_as(ctypes.POINTER(ctypes.c_char)),
+        valid_ptypes.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        len(valid_ptypes)
+    )
+    
+    if n < 0:
+        raise IOError(f'Failed to open {filepath}')
+    
+    # C parser returns raw AHF ptype codes (0, 1, 4, 5)
+    # map to Octavian encoding (0, 1, 2, 3)
+    ptype_remap = np.full(6, -1, dtype=np.int8)  # max AHF code is 5
+    for ahf_code, octavian_code in _PTYPE_MAP.items():
+        ptype_remap[ahf_code] = octavian_code
+    
+    result_ptypes = ptype_remap[out_ptypes[:n]]
+    
+    return out_hids[:n].copy(), out_pids[:n].copy(), result_ptypes.copy()
+
 def load_ahf(data_manager, particles_path, halos_path=None, mode='field'):
 
     particles_path = Path(particles_path)
@@ -126,24 +175,34 @@ def load_ahf(data_manager, particles_path, halos_path=None, mode='field'):
     print(f"Loading AHF data...")
     t1 = perf_counter()
     properties = read_ahf_halos(halos_path)
-    member_hids, member_pids, member_ptypes = read_ahf_particles(particles_path)
+    member_hids, member_pids, member_ptypes = read_ahf_particles_c(particles_path)
     t2 = perf_counter()
-    print(f"Finished in {t2 - t1} seconds.")
+    print(f"Finished in {(t2 - t1):.3f} seconds.")
     
     halo_ids = properties['ID'].to_numpy().astype(np.int64)
     parent_ids = properties['hostHalo'].to_numpy().astype(np.int64)
     parent_ids[parent_ids == 0] = -1 # AHF sets field halos equal to 0 but we want them as -1
     
     print(f"Extracting halo structure and membership...")
-    t1 = perf_counter()
+    t0 = perf_counter()
     reader = HaloReader(data_manager)
+    print("Remapping IDs...")
+    t1 = perf_counter()
     halo_ids, parent_ids, member_hids = reader.remap_ids(halo_ids, parent_ids, member_hids)
-    
+    print(f"  Remap: {perf_counter() - t1:.3f}s")
+
+    t1 = perf_counter()
     tree = HaloTree(halo_ids, parent_ids, properties)
-    membership = HaloMembership(tree, member_hids, member_pids, member_ptypes)
-    print(f"Finished in {t2 - t1} seconds.")
-    
+    print(f"  HaloTree: {perf_counter() - t1:.3f}s")
+
+    t1 = perf_counter()
+    membership = HaloMembership(tree, member_hids, member_pids, member_ptypes, exclusive=False)
+    print(f"  HaloMembership: {perf_counter() - t1:.3f}s")
+
     data_manager.halo_tree = tree
     data_manager.halo_membership = membership
-    
+
+    t1 = perf_counter()
     reader.assign(membership, mode)
+    print(f"  Assign: {perf_counter() - t1:.3f}s")
+    print(f"Finished in {(perf_counter() - t0):.3f} seconds.")
