@@ -1,10 +1,7 @@
 # test_ahf_reader.py
 from octavian.data_manager import DataManager
-print(f"Data manager imported.")
 from octavian.halo_reader.ahf import load_ahf
-print(f"AHF loader imported.")
 from yaml import safe_load
-print(f"YAML imported.")
 from time import perf_counter
 
 print(f"Beginning analysis.")
@@ -21,20 +18,21 @@ particles_path = '/home/jpduminy/octavian-snapshots/Simba_M200_snap_151.z0.000.A
 halos_path = '/home/jpduminy/octavian-snapshots/Simba_M200_snap_151.z0.000.AHF_halos'
 
 t1 = perf_counter()
-print('Loading AHF...')
 load_ahf(dm, particles_path, halos_path=halos_path, mode='field')
 t2 = perf_counter()
 time_taken = (t2 - t1) / 60 # mins
 print(f"AHF Data loaded. Total time: {time_taken:.3f} minutes.")
 
-
 for ptype in dm.config['ptypes']:
     assigned = (dm.data[ptype]['HaloID'] != -1).sum()
     total = len(dm.data[ptype])
-    fraction = assigned / total
-    print(f"{ptype}:")
-    print(  f"{assigned}/{total} assigned ({fraction} %)")
+    fraction = (assigned / total) * 100
+    print(f"Particle type breakdown:")
+    print(f"    {ptype}: {assigned}/{total} particles assigned ({fraction:.2f} %)")
 
 print(f'\nField halos: {len(dm.halo_tree._field_halos)}')
 print(f'Total halos: {len(dm.halo_tree.halo_ids)}')
 print(f'Max depth: {dm.halo_tree.depths.max()}')
+
+print(f"\n Test: sample hids (star, first 20):")
+print(dm.data['star']['HaloID'].head(20))

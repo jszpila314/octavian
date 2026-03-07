@@ -24,8 +24,6 @@ import pandas as pd
 
 from octavian.halo_reader.halo_utils import HaloMembership, HaloReader, HaloTree
 
-print(f"Imports successful.")
-
 # AHF assigns ptype codes, we change these to ptype names for Octavian compatibility
 _PTYPE_MAP = {0: 0, # gas
               1: 1, # dm

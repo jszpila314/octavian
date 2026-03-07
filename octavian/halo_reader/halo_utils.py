@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from octavian.data_manager import DataManager
 
+from time import perf_counter
 import numpy as np
 import pandas as pd
 from numba import njit
@@ -79,36 +80,84 @@ class HaloReader:
     def assign(self, membership, mode):
         """
         Resolve memberships, match to snapshot, assign HaloIDs.
+        Does one enormous sweep over the snapshot.
         """
+        # admin
+        t = perf_counter()
         pids, ptypes, hids = membership.branch_membership(mode=mode)
-
+        print(f"    branch_membership: {perf_counter() - t:.1f}s")
         config = self.dm.config
 
-        # are these externally sorted (HBT+) or not
-        ext_sorted = not membership.exclusive
+        # build a giant snapshot array 
+        t = perf_counter()
+        all_snap_pids = []
+        all_snap_offsets = {} # track where each ptype starts
+        offset = 0 # this will be used to move to the next ptype
 
         for ptype in config['ptypes']:
             ptype_code = PTYPE_ENCODE.get(ptype)
             if ptype_code is None:
                 continue
+            self.dm.load_property('pid', ptype)
+            snap_pids = self.dm.data[ptype]['pid'].to_numpy(dtype=np.int64)
+            all_snap_pids.append(snap_pids)
+            all_snap_offsets[ptype] = (offset, offset + len(snap_pids))
+            offset += len(snap_pids)
+        all_snap_pids = np.concatenate(all_snap_pids)
+        print(f"    build snap array: {perf_counter() - t:.1f}s")
 
-            # filter to this ptype
-            mask = ptypes == ptype_code
-            if not np.any(mask):
-                self.dm.data[ptype]['HaloID'] = pd.Series(
-                    np.full(len(self.dm.data[ptype]), -1, dtype=np.int64), 
-                    dtype='category'
-                )
+        # this is the massive bottleneck
+        t = perf_counter()
+        is_sorted = np.all(all_snap_pids[:-1] <= all_snap_pids[1:])
+        # conditional: if satisfied, can save an enormous amount of time
+        if is_sorted:
+            print(f"    snap already sorted, skipping argsort")
+            snap_order = np.arange(len(all_snap_pids), dtype=np.int64)
+            snap_pids_sorted = all_snap_pids
+        else:
+            snap_order = np.argsort(all_snap_pids)
+            snap_pids_sorted = all_snap_pids[snap_order]
+        print(f"    sort snap: {perf_counter() - t:.1f}s")
+
+        # are these externally sorted (HBT+) or not (AHF)
+        ext_sorted = not membership.exclusive
+
+        t = perf_counter()
+        if ext_sorted:
+            # skip the sort
+            ext_pids_sorted = pids
+            ext_hids_sorted = hids
+        else:
+            ext_order = np.argsort(pids)
+            ext_pids_sorted = pids[ext_order]
+            ext_hids_sorted = hids[ext_order]
+        print(f"    sort ext: {perf_counter() - t:.1f}s")
+
+        t = perf_counter()
+        # linear merge matches halo finder and original snapshot IDs
+        halo_ids_sorted = merge_match(snap_pids_sorted, ext_pids_sorted, ext_hids_sorted) 
+        print(f"    merge: {perf_counter() - t:.1f}s")
+    
+        # then insert hids
+        t = perf_counter()
+        halo_ids_all = np.empty_like(halo_ids_sorted)
+        halo_ids_all[snap_order] = halo_ids_sorted
+        print(f"    unsort: {perf_counter() - t:.1f}s")
+
+        # now distribute the ids to their ptypes
+        t = perf_counter()
+        for ptype in config['ptypes']:
+            if ptype not in all_snap_offsets:
                 continue
-
-            ext_pids = pids[mask]
-            ext_hids = hids[mask]
-
-            self.match_ptype(ptype, ext_pids, ext_hids, ext_sorted=ext_sorted)
+            start, end = all_snap_offsets[ptype]
+            self.dm.data[ptype]['HaloID'] = pd.Series(halo_ids_all[start:end], dtype='category') # send to data manager
+        print(f"    distribute: {perf_counter() - t:.1f}s")
 
     def match_ptype(self, ptype, ext_pids, ext_hids, ext_sorted=False):
         """
         Sorted merge matching of external particle IDs against snapshot.
+
+        Defunct since assign() moved to sweep the entire snapshot. But perhaps a useful skeleton?
         """
         self.dm.load_property('pid', ptype)
         snap_pids = self.dm.data[ptype]['pid'].to_numpy(dtype=np.int64)
@@ -136,7 +185,7 @@ class HaloReader:
         halo_ids = np.empty_like(halo_ids_sorted)
         halo_ids[snap_order] = halo_ids_sorted
         
-        self.dm.data[ptype]['HaloID'] = pd.Series(halo_ids, dtype='category')
+        self.dm.data[ptype]['HaloID'] = halo_ids
 
 class HaloTree:
     """
