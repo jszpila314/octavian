@@ -25,7 +25,6 @@ import numpy as np
 import pandas as pd
 from numba import njit
 
-
 # the readers extract Octavian-compatible particles
 # {'gas': 0, 'dm': 1, 'star': 2, 'bh': 3} is our convention for what readers must return
 # readers must also align halo IDs so they read 0, 1, 2 etc.
@@ -49,27 +48,32 @@ class HaloReader:
         self.tree = None
         self.membership = None
 
+        # this cache will speed up ptype assignment
+        self._snap_cache = {}
+
     def remap_ids(self, halo_ids, parent_ids, member_hids):
         """
         Map halo-finder-specific IDs to an agnostic 0, 1, 2 (speeds up agnostic classes, easier to work with).
+        You need to use searchsorted here as halo IDs can be enormous numbers.
         """
+        # sorted, unique hids
         unique_raw = np.unique(halo_ids)
-        raw_to_new = np.full(unique_raw.max() + 1, -1, dtype=np.int64)
-        raw_to_new[unique_raw] = np.arange(len(unique_raw))
-
-        new_halo_ids = raw_to_new[halo_ids]
-
+        # find where all halo IDs can be inserted such that the order of unique_raw is preserved
+        new_halo_ids = np.searchsorted(unique_raw, halo_ids)
+        
         # parents: map known IDs, anything else is -1 as is Octavian tradition
-        new_parent_ids = np.full_like(parent_ids, -1)
-        valid_parents = parent_ids != -1 
-        parent_in_range = valid_parents & (parent_ids <= unique_raw.max())
-        mapped = raw_to_new[parent_ids[parent_in_range]]
-        # only assign if the parent actually exists in our halo list
-        new_parent_ids[parent_in_range] = np.where(mapped != -1, mapped, -1)
-
-        # membership particle halo IDs
-        new_member_hids = raw_to_new[member_hids]
-
+        new_parent_ids = np.full_like(parent_ids, -1) # set all equal to -1 initially then replace
+        valid_parents = parent_ids != -1 # -1 handles orphan/parent case
+        if np.any(valid_parents): # if any valid parents exist
+            parent_positions = np.searchsorted(unique_raw, parent_ids[valid_parents]) # find where parents can be inserted
+            parent_matched = unique_raw[np.clip(parent_positions, 0, len(unique_raw) - 1)] == parent_ids[valid_parents] # match positions to IDs
+            new_parent_ids[valid_parents] = np.where(parent_matched, parent_positions, -1) # insert IDs
+        
+        # membership: same logic and structure
+        member_positions = np.searchsorted(unique_raw, member_hids)
+        member_matched = unique_raw[np.clip(member_positions, 0, len(unique_raw) - 1)] == member_hids
+        new_member_hids = np.where(member_matched, member_positions, -1)
+        
         return new_halo_ids, new_parent_ids, new_member_hids
 
     def assign(self, membership, mode):
@@ -79,6 +83,9 @@ class HaloReader:
         pids, ptypes, hids = membership.branch_membership(mode=mode)
 
         config = self.dm.config
+
+        # are these externally sorted (HBT+) or not
+        ext_sorted = not membership.exclusive
 
         for ptype in config['ptypes']:
             ptype_code = PTYPE_ENCODE.get(ptype)
@@ -97,29 +104,38 @@ class HaloReader:
             ext_pids = pids[mask]
             ext_hids = hids[mask]
 
-            self.match_ptype(ptype, ext_pids, ext_hids)
+            self.match_ptype(ptype, ext_pids, ext_hids, ext_sorted=ext_sorted)
 
-    def match_ptype(self, ptype, ext_pids, ext_hids):
+    def match_ptype(self, ptype, ext_pids, ext_hids, ext_sorted=False):
         """
-        Searchsorted matching of external particle IDs against snapshot.
+        Sorted merge matching of external particle IDs against snapshot.
         """
         self.dm.load_property('pid', ptype)
         snap_pids = self.dm.data[ptype]['pid'].to_numpy(dtype=np.int64)
 
-        # sort external for searchsorted
-        order = np.argsort(ext_pids)
-        sorted_pids = ext_pids[order]
-        sorted_hids = ext_hids[order]
+        # cache these to avoid repeated argsort on up to 600m particles (I ran on simba m100n1024)
+        cache = self._snap_cache.setdefault(ptype, {})
+        if 'order' not in cache:
+            cache['order'] = np.argsort(snap_pids)
+            cache['pids_sorted'] = snap_pids[cache['order']]
+        snap_order = cache['order']
+        snap_pids_sorted = cache['pids_sorted']
 
-        # match
-        positions = np.searchsorted(sorted_pids, snap_pids)
-        positions = np.clip(positions, 0, len(sorted_pids) - 1)
-        matched = sorted_pids[positions] == snap_pids
-
-        # assign — unmatched particles get -1
-        halo_ids = np.full(len(snap_pids), -1, dtype=np.int64)
-        halo_ids[matched] = sorted_hids[positions[matched]]
-
+        if ext_sorted:
+            ext_pids_sorted = ext_pids
+            ext_hids_sorted = ext_hids
+        else:
+            ext_order = np.argsort(ext_pids)
+            ext_pids_sorted = ext_pids[ext_order]
+            ext_hids_sorted = ext_hids[ext_order]
+        
+        # linear merge using numba function
+        halo_ids_sorted = merge_match(snap_pids_sorted, ext_pids_sorted, ext_hids_sorted)
+        
+        # unsort to return to original snapshot order
+        halo_ids = np.empty_like(halo_ids_sorted)
+        halo_ids[snap_order] = halo_ids_sorted
+        
         self.dm.data[ptype]['HaloID'] = pd.Series(halo_ids, dtype='category')
 
 class HaloTree:
@@ -197,9 +213,10 @@ class HaloMembership:
     Handles halo membership for a single snapshot.
     """
 
-    def __init__(self, tree: HaloTree, halo_ids, particle_ids, ptype_codes):
+    def __init__(self, tree: HaloTree, halo_ids, particle_ids, ptype_codes, exclusive):
 
         self.tree = tree
+        self.exclusive = exclusive
 
         # guard for no halos
         if len(halo_ids) == 0:
@@ -275,6 +292,10 @@ class HaloMembership:
         else:
             raise ValueError(f"Mode {mode} not supported (yet...)")
         
+        # some halo finders (HBT+) have no duplicates, so we can skip those steps
+        if self.exclusive:
+            return self._member_pids, self._member_ptypes, resolved_hids
+        
         return self._deduplicate(
             self._member_pids, self._member_ptypes, 
             resolved_hids, prefer_deepest=(mode == 'subhalo')
@@ -338,3 +359,24 @@ def build_field_map(halo_ids, parent_ids, id_to_idx):
             current = parent
         field_map[hid] = current
     return field_map
+
+@njit
+def merge_match(snap_pids_sorted, ext_pids_sorted, ext_hids_sorted):
+    n_snap = len(snap_pids_sorted)
+    n_ext = len(ext_pids_sorted)
+    out = np.full(n_snap, -1, dtype=np.int64)
+    
+    i = 0
+    j = 0
+    
+    while i < n_snap and j < n_ext:
+        if snap_pids_sorted[i] == ext_pids_sorted[j]:
+            out[i] = ext_hids_sorted[j]
+            i += 1
+            j += 1
+        elif snap_pids_sorted[i] < ext_pids_sorted[j]:
+            i += 1
+        else:
+            j += 1
+    
+    return out
