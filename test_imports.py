@@ -5,7 +5,7 @@ comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 nsplit = comm.Get_size()
 
-path_to_snapshot = "/disk04/rad/sim/m25n512/s50/snap_m25n512_062.hdf5"
+path_to_snapshot = "/disk04/rad/sim/m100n1024/s50/snap_m100n1024_151.hdf5"
 path_to_filtered_output = "/home/jpduminy/octavian-analysis/split-snapshot"
 path_to_filtered_analysis = "/home/jpduminy/octavian-analysis/finished-snapshot"
 path_to_output = "/home/jpduminy/octavian-analysis"
