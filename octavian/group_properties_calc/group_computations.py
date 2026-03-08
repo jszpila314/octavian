@@ -9,6 +9,35 @@ Numba requires quite basic syntax meaning these functions are inherently quite r
 import numpy as np
 from numba import njit, prange, boolean
 
+
+"""
+
+Physical Quantities
+
+"""
+
+@njit(parallel=True)
+def compute_centre_of_mass(pos, vel, mass, group_idx, n_groups):
+    com_pos = np.zeros((n_groups, 3))
+    com_vel = np.zeros((n_groups, 3))
+    total_mass = np.zeros(n_groups)
+    
+    for i in prange(len(mass)):
+        g = group_idx[i]
+        m = mass[i]
+        total_mass[g] += m
+        for d in range(3):
+            com_pos[g, d] += pos[i, d] * m
+            com_vel[g, d] += vel[i, d] * m
+    
+    for g in range(n_groups):
+        if total_mass[g] > 0:
+            for d in range(3):
+                com_pos[g, d] /= total_mass[g]
+                com_vel[g, d] /= total_mass[g]
+    
+    return com_pos, com_vel, total_mass
+
 @njit(parallel=True)
 def compute_angular_momentum(pos_rel, vel_rel, mass, group_idx, n_groups):
     L = np.zeros((n_groups, 3))
@@ -88,24 +117,34 @@ def compute_radial_quantiles(radii, mass, group_idx, n_groups, quantiles):
     return result
 
 @njit
-def compute_virial_quantities(radii, mass, group_idx, n_groups, rhocrit, factors):
+def compute_virial_quantities(radius, mass, start, end, rhocrit, factors):
+
+    n_groups = len(start)
     volume_factor = 4.0 / 3.0 * np.pi
-    cumulative = np.zeros(n_groups)
     
     result_r = np.full((n_groups, len(factors)), np.nan)
     result_m = np.full((n_groups, len(factors)), np.nan)
     
-    for i in range(len(mass)):
-        g = group_idx[i]
-        cumulative[g] += mass[i]
-        r = radii[i]
+    for g in range(n_groups):
+        s = start[g]
+        e = end[g]
+        if s == e:
+            continue
         
-        if r > 0:
-            overdensity = cumulative[g] / (volume_factor * r**3) / rhocrit
-            
-            for f in range(len(factors)):
-                if overdensity >= factors[f]:
-                    result_r[g, f] = r
-                    result_m[g, f] = cumulative[g]
+        r = radius[s:e]
+        m = mass[s:e]
+        order = np.argsort(r)
+        r = r[order]
+        m = m[order]
+        
+        cumulative = np.cumsum(m)
+        
+        for i in range(len(r)):
+            if r[i] > 0:
+                overdensity = cumulative[i] / (volume_factor * r[i]**3) / rhocrit
+                for f in range(len(factors)):
+                    if overdensity >= factors[f]:
+                        result_r[g, f] = r[i]
+                        result_m[g, f] = cumulative[i]
     
     return result_r, result_m
