@@ -95,30 +95,36 @@ def compute_rotation_quantities(pos_rel, vel_rel, mass, group_idx, L_group, n_gr
     return counter_rotating_mass, krot_sum, ktot_sum
 
 @njit
-def compute_radial_quantiles(radii, mass, group_idx, n_groups, quantiles):
-    group_mass_total = np.zeros(n_groups)
-    for i in range(len(mass)):
-        group_mass_total[group_idx[i]] += mass[i]
-    
-    cumulative = np.zeros(n_groups)
+def compute_radial_quantiles(radius, mass, start, end, quantiles):
+
+    n_groups = len(start)
     result = np.full((n_groups, len(quantiles)), np.nan)
-    found = np.zeros((n_groups, len(quantiles)), dtype=boolean)
     
-    for i in range(len(mass)):
-        g = group_idx[i]
-        cumulative[g] += mass[i]
-        frac = cumulative[g] / group_mass_total[g]
+    for g in range(n_groups):
+        s = start[g]
+        e = end[g]
+        if s == e:
+            continue
+        
+        r = radius[s:e]
+        m = mass[s:e]
+        order = np.argsort(r)
+        r = r[order]
+        m = m[order]
+        
+        cum = np.cumsum(m)
+        frac = cum / cum[-1]
         
         for q in range(len(quantiles)):
-            if not found[g, q] and frac >= quantiles[q]:
-                result[g, q] = radii[i]
-                found[g, q] = True
+            idx = np.searchsorted(frac, quantiles[q])
+            if idx < len(r):
+                result[g, q] = r[idx]
     
     return result
 
 @njit
 def compute_virial_quantities(radius, mass, start, end, rhocrit, factors):
-
+    
     n_groups = len(start)
     volume_factor = 4.0 / 3.0 * np.pi
     
