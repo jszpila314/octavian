@@ -95,56 +95,81 @@ def compute_rotation_quantities(pos_rel, vel_rel, mass, group_idx, L_group, n_gr
     return counter_rotating_mass, krot_sum, ktot_sum
 
 @njit
-def compute_radial_quantiles(radius, mass, start, end, quantiles):
+def compute_radial_quantiles(radius, mass, group_idx, n_groups, quantiles):
 
-    n_groups = len(start)
+    counts = np.zeros(n_groups, dtype=np.int64)
+    for i in range(len(mass)):
+        counts[group_idx[i]] += 1
+
+    start = np.zeros(n_groups, dtype=np.int64)
+    for g in range(1, n_groups):
+        start[g] = start[g-1] + counts[g-1]
+
+    idx_sorted = np.empty(len(mass), dtype=np.int64)
+    pos = np.zeros(n_groups, dtype=np.int64)
+    for i in range(len(mass)):
+        g = group_idx[i]
+        idx_sorted[start[g] + pos[g]] = i
+        pos[g] += 1
+
     result = np.full((n_groups, len(quantiles)), np.nan)
-    
     for g in range(n_groups):
         s = start[g]
-        e = end[g]
+        e = s + counts[g]
         if s == e:
             continue
-        
-        r = radius[s:e]
-        m = mass[s:e]
+        indices = idx_sorted[s:e]
+        r = radius[indices]
+        m = mass[indices]
         order = np.argsort(r)
         r = r[order]
         m = m[order]
-        
         cum = np.cumsum(m)
         frac = cum / cum[-1]
-        
         for q in range(len(quantiles)):
             idx = np.searchsorted(frac, quantiles[q])
             if idx < len(r):
                 result[g, q] = r[idx]
-    
+
     return result
 
+
 @njit
-def compute_virial_quantities(radius, mass, start, end, rhocrit, factors):
-    
-    n_groups = len(start)
+def compute_virial_quantities(radius, mass, group_idx, n_groups, rhocrit, factors):
+
     volume_factor = 4.0 / 3.0 * np.pi
-    
+
+    counts = np.zeros(n_groups, dtype=np.int64)
+    for i in range(len(mass)):
+        counts[group_idx[i]] += 1
+
+    start = np.zeros(n_groups, dtype=np.int64)
+    for g in range(1, n_groups):
+        start[g] = start[g-1] + counts[g-1]
+
+    idx_sorted = np.empty(len(mass), dtype=np.int64)
+    pos = np.zeros(n_groups, dtype=np.int64)
+    for i in range(len(mass)):
+        g = group_idx[i]
+        idx_sorted[start[g] + pos[g]] = i
+        pos[g] += 1
+
     result_r = np.full((n_groups, len(factors)), np.nan)
     result_m = np.full((n_groups, len(factors)), np.nan)
-    
+
     for g in range(n_groups):
         s = start[g]
-        e = end[g]
+        e = s + counts[g]
         if s == e:
             continue
-        
-        r = radius[s:e]
-        m = mass[s:e]
+        indices = idx_sorted[s:e]
+        r = radius[indices]
+        m = mass[indices]
         order = np.argsort(r)
         r = r[order]
         m = m[order]
-        
         cumulative = np.cumsum(m)
-        
+
         for i in range(len(r)):
             if r[i] > 0:
                 overdensity = cumulative[i] / (volume_factor * r[i]**3) / rhocrit
@@ -152,5 +177,5 @@ def compute_virial_quantities(radius, mass, start, end, rhocrit, factors):
                     if overdensity >= factors[f]:
                         result_r[g, f] = r[i]
                         result_m[g, f] = cumulative[i]
-    
+
     return result_r, result_m

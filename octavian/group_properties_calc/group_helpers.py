@@ -130,6 +130,10 @@ def sort_by_group(group_ids):
     Meaning we now have a flat array for quick vectorised operations.
     Similar to the CSR format that forms the basis of Octavian's I/O.
     """
+    # guard which in practice should never happen (see common_group_properties)
+    if len(group_ids) == 0:
+        return np.array([], dtype=np.int64), np.array([]), np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+    
     # https://en.wikipedia.org/wiki/Merge_sort
     # it's safer to use a 'stable' sorting algorithm for the best science in exchange for a slight runtime cost
     order = np.argsort(group_ids, kind='mergesort') 
