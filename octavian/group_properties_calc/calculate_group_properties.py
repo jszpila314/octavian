@@ -29,25 +29,12 @@ from octavian.group_properties_calc.group_helpers import (
     broadcast_to_particles,
     sort_by_group,
     weighted_mean_per_group,
+    extract_particle_arrays,
 )
 
 # Suppress pandas fragmented frame performance warnings (superfluous)  https://stackoverflow.com/a/76306267
 import warnings
 warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
-
-def _get_group_idx(data: pd.DataFrame, group_data: pd.DataFrame, groupID: str) -> np.ndarray:
-  """
-  This is more to future-proof things. If data gets reindexed or modified, this should handle things.
-  """
-  return group_data.index.get_indexer(data[groupID])
-
-def broadcast_properties(data: pd.DataFrame, group_data: pd.DataFrame, groupID: str, properties: list[str] | str, group_idx: np.ndarray = None) -> np.ndarray:
-  """
-  Broadcasts required properties as a numpy array.
-  """
-  if group_idx is None:
-    group_idx = _get_group_idx(data, group_data, groupID)
-  return group_data[properties].to_numpy()[group_idx]
 
 def common_group_properties(data_manager: DataManager, group_name: str, particle_type: str) -> None:
   """
@@ -245,10 +232,6 @@ def common_group_properties(data_manager: DataManager, group_name: str, particle
   # -
   # step 10: radial quantities
   # -
-
-  order, unique_ids, g_start, g_end = sort_by_group(group_idx)
-  radii_sorted = radii[order]
-  masses_sorted = masses[order]
 
   # from previous code
   quantiles = np.array([0.2, 0.5, 0.8])
@@ -460,66 +443,104 @@ def calculate_local_densities(data_manager: DataManager) -> None:
       group_data[f'local_mass_density_{int(radius)}'] = mass_sums / volume
       group_data[f'local_number_density_{int(radius)}'] = counts / volume
 
+def calculate_aperture_masses(data_manager, config):
+    
+    group_data = data_manager.group_data['galaxies']
+    n_galaxies = len(group_data)
+    galaxy_pos = group_data[['x_total', 'y_total', 'z_total']].to_numpy()
+    parent_halo = group_data['parent_halo_index'].to_numpy()
+    aperture = 30. # as defined previously
+
+    # use helper function
+    all_pos, all_mass, all_codes, all_halos, ptype_names = extract_particle_arrays(
+        data_manager, config, include_hydrogen=True
+    )
+    # may want to check the helper function include_hydrogen part, thought it might be useful in future
+    n_ptypes = len(ptype_names)
+
+    # pre-sort particles by halo
+    order, unique_halos, h_start, h_end = sort_by_group(all_halos)
+    all_pos = all_pos[order]
+    all_mass = all_mass[order]
+    all_codes = all_codes[order]
+
+    # pre-sort galaxies by parent halo
+    gal_order, halos_with_galaxies, gal_start, gal_end = sort_by_group(parent_halo)
+
+    result = np.zeros((n_galaxies, n_ptypes))
+
+    for h in range(len(unique_halos)):
+        halo_id = unique_halos[h]
+        halo_pos = all_pos[h_start[h]:h_end[h]]
+        halo_mass = all_mass[h_start[h]:h_end[h]]
+        halo_codes = all_codes[h_start[h]:h_end[h]]
+
+        # guard
+        if len(halo_pos) == 0:
+            continue
+
+        gh_idx = np.searchsorted(halos_with_galaxies, halo_id) # find where the hid sits in halos_with_galaxies
+        if gh_idx >= len(halos_with_galaxies) or halos_with_galaxies[gh_idx] != halo_id:
+            continue # skip halos with no galaxies
+        gal_indices = gal_order[gal_start[gh_idx]:gal_end[gh_idx]]
+
+        # guard
+        if len(gal_indices) == 0:
+            continue
+
+        # build KDTree (explained in FOF6D code)
+        tree = KDTree(halo_pos)
+        neighbor_lists = tree.query_ball_point(galaxy_pos[gal_indices], aperture)
+
+        for galaxies_idx_local, neighbours in enumerate(neighbor_lists):
+            if len(neighbours) == 0:
+                continue
+            neighbours = np.array(neighbours)
+            # np.bincount optimisation, as in the group_helpers.py functions
+            masses_by_type = np.bincount(
+                halo_codes[neighbours], weights=halo_mass[neighbours], minlength=n_ptypes
+            )
+            # masses contained within the 30kpc aperture
+            result[gal_indices[galaxies_idx_local], :] = masses_by_type
+
+    for i, name in enumerate(ptype_names):
+        group_data[f'mass_{name}_30kpc'] = result[:, i]
+
+    group_data['mass_total_30kpc'] = result[:, :len(config['ptypes'])].sum(axis=1)
 
 def calculate_group_properties(data_manager: DataManager) -> None:
+
+  # admin
   config = data_manager.config
   for ptype in config['ptypes']:
     data_manager.load_property('potential', ptype)
 
   groups = config['groups']
 
+  # unnecessary columns
   columns_to_drop = ['vx', 'vy', 'vz', 'potential']
   to_process = config['to_process']
 
-  # total common
-  if 'total' in to_process:
-    for group in groups:
-      common_group_properties(data_manager, group, 'total')
+  # order to iterate over
+  ptype_order = ['total', 'dm', 'baryon', 'gas', 'star', 'bh']
+  # drop the necessary columns afterwards
+  drop_after = {'dm', 'gas', 'star', 'bh'}
 
+  # common group properties
+  for ptype in ptype_order:
+      if ptype not in to_process:
+          continue
+      for group in groups:
+          common_group_properties(data_manager, group, ptype)
+      if ptype in drop_after:
+          data_manager.data[ptype].drop(columns=columns_to_drop, inplace=True)
 
-  # dm common
-  if 'dm' in to_process:
-    for group in groups:
-      common_group_properties(data_manager, group, 'dm')
-
-    data_manager.data['dm'].drop(columns=columns_to_drop, inplace=True)
-
-
-  # baryon common
-  if 'baryon' in to_process:
-    for group in groups:
-      common_group_properties(data_manager, group, 'baryon')
-
-
-  # gas common
-  if 'gas' in to_process:
-    for group in groups:
-      common_group_properties(data_manager, group, 'gas')
-  
-    data_manager.data['gas'].drop(columns=columns_to_drop, inplace=True)
-
-
-  # star common
-  if 'star' in to_process:
-    for group in groups:
-      common_group_properties(data_manager, group, 'star')
-
-    data_manager.data['star'].drop(columns=columns_to_drop, inplace=True)
-
-
-  # bh common
-  if 'bh' in to_process:
-    for group in groups:
-      common_group_properties(data_manager, group, 'bh')
-
-    data_manager.data['bh'].drop(columns=columns_to_drop, inplace=True)
-
-  # gas
+  # gas properties
   if 'gas' in to_process:
     for property in ['rho', 'nh', 'fH2', 'metallicity', 'sfr', 'temperature']:
       data_manager.load_property(property, 'gas')
 
-    # gas massses
+    # gas masses
     data = data_manager.data['gas']
     data['fHI'] = data.eval('nh / mass')
     not_conserving_mass = data.eval('(fHI + fH2) > 1')
@@ -531,7 +552,7 @@ def calculate_group_properties(data_manager: DataManager) -> None:
     for group in groups:
       gas_group_properties(data_manager, group)
 
-  # star
+  # star properties
   if 'star' in to_process:
     for property in ['age', 'metallicity']:
       data_manager.load_property(property, 'star')
@@ -539,44 +560,18 @@ def calculate_group_properties(data_manager: DataManager) -> None:
     for group in groups:
       star_group_properties(data_manager, group)
 
-  # bh
+  # bh properties
   if 'bh' in to_process:
     for property in ['bhmdot']:
       data_manager.load_property(property, 'bh')
-    
-    star_props_columns = ['HaloID', 'GalID', 'ptype', 'mass', 'bhmdot']
+      
     for group in groups:
       bh_group_properties(data_manager, group)
 
-  # aperture
+  # apertures
   if 'apertures' in to_process and 'galaxies' in config['groups']:
-    aperture_props_columns = ['HaloID', 'GalID', 'ptype', 'mass', 'x',  'y', 'z']
-    data = pd.concat([data_manager.data[ptype][aperture_props_columns] for ptype in config['ptypes']])
+    calculate_aperture_masses(data_manager, config)
 
-    aperture_HI_columns = ['HaloID', 'GalID', 'ptype', 'mass_HI', 'x',  'y', 'z']
-    HI_gas = data_manager.data['gas'][aperture_HI_columns].copy()
-    HI_gas.rename(columns={'mass_HI': 'mass'}, inplace=True)
-    HI_gas['ptype'] = 'HI'
-
-    aperture_H2_columns = ['HaloID', 'GalID', 'ptype', 'mass_H2', 'x',  'y', 'z']
-    H2_gas = data_manager.data['gas'][aperture_H2_columns].copy()
-    H2_gas.rename(columns={'mass_H2': 'mass'}, inplace=True)
-    H2_gas['ptype'] = 'H2'
-
-    data = pd.concat([data, HI_gas, H2_gas], ignore_index=True)
-
-    aperture = 30.
-    galaxy_positions = data_manager.group_data['galaxies'][['x_total', 'y_total', 'z_total']].to_numpy()
-
-    process_halo = partial(calculate_aperture_masses, aperture=aperture, galaxy_positions=galaxy_positions)
-    aperture_masses = data.groupby(by='HaloID').apply(process_halo, include_groups = False).reset_index(names=['HaloID', 'GalID'])
-    aperture_masses.set_index('GalID', inplace=True)
-
-    for ptype in config['ptypes']:
-      data_manager.group_data['galaxies'][f'mass_{ptype}_30kpc'] = aperture_masses[ptype]
-    data_manager.group_data['galaxies']['mass_HI_30kpc'] = aperture_masses['HI']
-    data_manager.group_data['galaxies']['mass_H2_30kpc'] = aperture_masses['H2']
-    data_manager.group_data['galaxies']['mass_total_30kpc'] = data_manager.group_data['galaxies'][[f'mass_{ptype}_30kpc' for ptype in config['ptypes']]].sum(axis=1)
-
+  # densities
   if 'local_densities' in to_process:
     calculate_local_densities(data_manager)
