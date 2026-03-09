@@ -51,15 +51,26 @@ def get_mean_interparticle_separation(data_manager: 'DataManager') -> None:
 
 
 # initial assignment of galaxy ids through sorting in x,y,z directions
-def fof_sort_halo(halo: 'pd.DataFrame', minstars: int, fof_LL: float) -> 'pd.DataFrame':
-  for direction in ['x', 'y', 'z']:
-    halo = halo.sort_values(by=['GalID', direction])
-    halo['distance'] = np.diff(halo[direction], prepend=halo[direction].iloc[0])
-    halo['GalID'] += np.cumsum(halo['distance'] > fof_LL)
+def fof_sort_halo(pos, vel, ptype, original_idx, minstars, fof_LL):
+    n = len(pos)
+    gal_ids = np.zeros(n, dtype=np.int32)
 
-  halo = halo.groupby(by='GalID').filter(lambda group: len(group) >= minstars)
+    for dim in range(3):
+        order = np.lexsort((pos[:, dim], gal_ids))
+        pos = pos[order]
+        vel = vel[order]
+        ptype = ptype[order]
+        original_idx = original_idx[order]
+        gal_ids = gal_ids[order]
 
-  return halo
+        diffs = np.diff(pos[:, dim], prepend=pos[0, dim])
+        gal_ids += np.cumsum(diffs > fof_LL).astype(np.int32)
+
+    # filter small groups
+    unique, counts = np.unique(gal_ids, return_counts=True)
+    valid = np.isin(gal_ids, unique[counts >= minstars])
+
+    return pos[valid], vel[valid], ptype[valid], original_idx[valid], gal_ids[valid]
 
 #
 # helper functions
@@ -89,25 +100,44 @@ def kernel(r_over_h,kerneltab):
 #
 
 # fof6d function to apply on groups
-def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: int, fof_LL: float, vel_LL: Optional[float] = None) -> list[list[tuple[int, pd.Index]]]:
-  timings = {'n_particles': len(halo)}
-  if len(halo) < minstars:
-    return [], timings
+def run_fof6d_in_halo(
+    pos, vel, ptype, original_idx,
+    kernel_table, minstars, fof_LL, vel_LL=None
+):
   
+  timings = {'n_particles': len(pos)}
+  if len(pos) < minstars:
+      return [], timings
+
   t0 = perf_counter()
 
   # stage 1: directional group find
-  halo = fof_sort_halo(halo, minstars, fof_LL)
+  pos, vel, ptype, original_idx, gal_ids = fof_sort_halo(
+      pos, vel, ptype, original_idx, minstars, fof_LL
+  )
   timings['sort'] = perf_counter() - t0
-  groups = [halo.loc[halo['GalID'] == id] for id in halo['GalID'].unique()]
 
-  if len(groups) == 0:
+  if len(pos) == 0:
     return [], timings
+  
+  # split into groups
+  group_order = np.argsort(gal_ids, kind='stable')
+  sorted_gal_ids = gal_ids[group_order]
+  splits = np.flatnonzero(np.diff(sorted_gal_ids)) + 1
+  group_indices = np.split(group_order, splits)
 
   # skip stage 2 if vel_LL not defined, all members of a group form a galaxy
   if vel_LL is None:
-    galaxies = [[(i, group_ptype.index) for i, group_ptype in group.groupby(by='ptype')] for group in groups]
-    return galaxies, timings
+      galaxies = []
+      for indices in group_indices:
+          g_ptype = ptype[indices]
+          g_idx = original_idx[indices]
+          galaxy = []
+          for pt in np.unique(g_ptype):
+              mask = g_ptype == pt
+              galaxy.append((pt, g_idx[mask]))
+          galaxies.append(galaxy)
+      return galaxies, timings
   
 
   #
@@ -123,19 +153,21 @@ def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: in
   t_merge_tot = 0
 
   new_groups = []
-  for group in groups:
-    t1 = perf_counter()
+  for indices in group_indices:
+    g_pos = pos[indices]
+    g_vel = vel[indices]
+    g_ptype = ptype[indices]
+    g_idx = original_idx[indices]
+    n = len(indices)
     # NOTE: everything cast to KDTree with scipy functionality
-    pos = group[['x', 'y', 'z']].to_numpy() 
-    tree = KDTree(pos)
+    t1 = perf_counter()
+    tree = KDTree(g_pos)
     sdm = tree.sparse_distance_matrix(tree, fof_LL, output_type='coo_matrix')
     t2 = perf_counter()
     t_neighbors_tot += t2 - t1 # profiling: nearest neighbour speeds
-    vel = group[['vx', 'vy', 'vz']].to_numpy()
 
     # NOTE: new algorithm using a sparse matrix implementation to avoid expensive python loops and pass code into scipy's C
     # vectorised COO (COOrdinate) construction (scipy recommended)
-    n = len(group)
     # meet the definition of a sparse matrix
     # row[i], col[i] = value[i]
     rows = sdm.row
@@ -147,7 +179,7 @@ def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: in
     w = kernel(q, kernel_table)  # already works on arrays
 
     # vectorised velocity differences
-    vel_diff = np.linalg.norm(vel[cols] - vel[rows], axis=1)
+    vel_diff = np.linalg.norm(g_vel[cols] - g_vel[rows], axis=1)
 
     # vectorised sigma per particle
     weighted_dv_sq = w * vel_diff**2 # same as Jakub (I renamed variables for readability)
@@ -167,14 +199,19 @@ def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: in
     t4 = perf_counter()
     t_merge_tot += t4 - t3 # profiling: merging (big python loop no more)
 
-    # unavoidable python loop
-    for label in range(n_components):
-        indices = np.where(labels == label)[0]
-        if len(indices) < minstars:
-            continue
-        galaxy = group.iloc[indices]
-        if len(galaxy.loc[galaxy['ptype'] == 'star']) >= minstars:
-            new_groups.append(galaxy)
+
+    # split by label — numpy instead of python loop
+    label_order = np.argsort(labels)
+    sorted_labels = labels[label_order]
+    label_splits = np.flatnonzero(np.diff(sorted_labels)) + 1
+    component_groups = np.split(label_order, label_splits)
+
+    for component in component_groups:
+      if len(component) < minstars:
+          continue
+      c_ptype = g_ptype[component]
+      if np.sum(c_ptype == 'star') >= minstars:
+          new_groups.append((g_ptype[component], g_idx[component]))
 
   # profiling: timings
   timings['neighbors'] = t_neighbors_tot
@@ -182,7 +219,13 @@ def run_fof6d_in_halo(halo: pd.DataFrame, kernel_table: np.ndarray, minstars: in
   timings['merge'] = t_merge_tot
 
   # unavoidable python loop
-  galaxies = [[(i, group_ptype.index) for i, group_ptype in group.groupby(by='ptype')] for group in new_groups]
+  galaxies = []
+  for g_ptype, g_idx in new_groups:
+      galaxy = []
+      for pt in np.unique(g_ptype):
+          mask = g_ptype == pt
+          galaxy.append((pt, g_idx[mask]))
+      galaxies.append(galaxy)
 
   return galaxies, timings
 
@@ -220,7 +263,7 @@ def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
   fof_columns = ['HaloID', 'x', 'y', 'z', 'vx', 'vy', 'vz', 'ptype']
   fof_filter = lambda halo: len(halo) >= config['MINIMUM_STARS_PER_GALAXY']
   fof_halos = data_manager.data['star'].groupby('HaloID', observed=True).filter(fof_filter)
-  fof_haloids = np.unique(fof_halos['HaloID']) #  REVIEW:
+  fof_haloids = np.unique(fof_halos['HaloID']) 
 
   if 'bh' in config['ptypes']:
     fof_halos = pd.concat([data_manager.data['gas'].loc[data_manager.data['gas']['dense_gas'], fof_columns], data_manager.data['star'][fof_columns], data_manager.data['bh'][fof_columns]]).query('HaloID in @fof_haloids')
@@ -231,11 +274,35 @@ def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
   kernel_table = create_kernel_table(fof_LL)
   grouped = fof_halos.groupby(by='HaloID', observed=True)
 
-  results = Parallel(n_jobs=nproc)(delayed(run_fof6d_in_halo)(halo, kernel_table, config['MINIMUM_STARS_PER_GALAXY'], fof_LL, vel_LL) for idx, halo in grouped)
+  work_items = []
+  halo_ids = []
+  for halo_id, halo_df in grouped:
+      work_items.append((
+          halo_df[['x', 'y', 'z']].to_numpy(),
+          halo_df[['vx', 'vy', 'vz']].to_numpy(),
+          halo_df['ptype'].to_numpy(),
+          halo_df.index.to_numpy(),
+      ))
+      halo_ids.append(halo_id)
+
+  # sort largest first — memory-aware scheduling
+  order = sorted(range(len(work_items)), key=lambda i: len(work_items[i][0]), reverse=True)
+  work_items = [work_items[i] for i in order]
+  halo_ids = [halo_ids[i] for i in order]
+
+  results = Parallel(n_jobs=12, pre_dispatch='2*n_jobs', batch_size=1)(
+      delayed(run_fof6d_in_halo)(
+          pos, vel, ptype, idx,
+          kernel_table, config['MINIMUM_STARS_PER_GALAXY'], fof_LL, vel_LL
+      )
+      for pos, vel, ptype, idx in work_items
+  )
+
+  # unpack results (same logic as before, just reordered)
   galaxies = [g for gals, _ in results for g in gals if len(gals) != 0]
   all_timings = [t for _, t in results]
   timings_df = pd.DataFrame(all_timings)
-  
+
   for ptype in config['ptypes']:
     data_manager.data[ptype]['GalID'] = -1
   
