@@ -65,9 +65,24 @@ def merge_catalogues(files: list[str], outfile: str, configfile: str) -> None:
       halo_group[dataset] = np.concatenate(halo_data)[halo_order]
       galaxy_group[dataset] = np.concatenate(galaxy_data)[galaxy_order]
 
-    halo_group['HaloID'] = np.arange(np.sum(list(file_lengths['halos'].values())))
-    galaxy_group['GalID'] = np.arange(np.sum(list(file_lengths['galaxies'].values())))
+    halo_ids = np.arange(np.sum(list(file_lengths['halos'].values())))
+    halo_group['HaloID'] = halo_ids
+
+    galaxy_ids = np.arange(np.sum(list(file_lengths['galaxies'].values())))
+    galaxy_group['GalID'] = galaxy_ids
     galaxy_group['parent_halo_index'] = galaxy_parent_halo
+
+    halo_galaxies = [[] for id in halo_ids]
+    for parent_halo_id in np.unique(galaxy_parent_halo):
+      halo_galaxies[parent_halo_id] = galaxy_ids[galaxy_parent_halo == parent_halo_id]
+
+    serialised_galaxy_ids = np.concatenate(halo_galaxies)
+    lengths = np.asarray([len(id_list) for id_list in halo_galaxies])
+    offsets = np.cumsum(lengths) - lengths
+
+    halo_group['galaxy_index_list'] = serialised_galaxy_ids
+    halo_group['galaxy_index_list_offsets'] = offsets
+    halo_group['galaxy_index_list_lengths'] = lengths
     
     ptype_lists = ['glist', 'slist', 'dmlist', 'bhlist']
     for ptype_list in ptype_lists:
