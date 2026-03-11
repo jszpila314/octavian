@@ -6,12 +6,16 @@ if TYPE_CHECKING:
 import h5py
 import os
 import numpy as np
+from time import perf_counter
+
 import warnings
-
-
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
+
 def save_group_properties(data_manager: DataManager, filename: str) -> None:
+  data_manager.logger.info('Saving datasets...')
+  t1 = perf_counter()
+
   config = data_manager.config
 
   if os.path.exists(filename):
@@ -49,3 +53,6 @@ def save_group_properties(data_manager: DataManager, filename: str) -> None:
         halo_data.create_dataset(dataset_name, data=data_manager.group_data['halos'][column].to_numpy(), compression=1)
       if 'galaxies' in config['groups'] and np.all(np.isin(column, galaxy_columns)):
         galaxy_data.create_dataset(dataset_name, data=data_manager.group_data['galaxies'][column].to_numpy(), compression=1)
+
+  t2 = perf_counter()
+  data_manager.logger.info(f'Saving datasets done in {t2-t1:.2f} seconds.')

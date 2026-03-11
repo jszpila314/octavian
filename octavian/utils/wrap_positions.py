@@ -5,16 +5,22 @@ if TYPE_CHECKING:
 
 import numpy as np
 import pandas as pd
+from time import perf_counter
 
 def wrap_positions(data_manager: DataManager) -> None:
+  data_manager.logger.info(f'Wrapping positions...')
+  t1 = perf_counter()
+
   config = data_manager.config
 
   boxsize = data_manager.simulation['boxsize']/data_manager.simulation['h']
 
   # select halos with particles near boundary
+  t2 = perf_counter()
   halos_to_wrap = {}
   for ptype in config['ptypes']:
     data_manager.load_property('pos', ptype)
+  t3 = perf_counter()
 
   data = pd.concat([data_manager.data[ptype] for ptype in config['ptypes']])
   halos_grouped = data.groupby(by='HaloID', observed=True)
@@ -29,3 +35,6 @@ def wrap_positions(data_manager: DataManager) -> None:
       too_high = data_manager.data[ptype][direction] > 0.5*boxsize
 
       data_manager.data[ptype].loc[in_halos_to_wrap & too_high, direction] -= boxsize
+
+  t4 = perf_counter()
+  data_manager.logger.info(f'Wrapping positions done in {t4-t1:.2f} seconds. (Load reduced: {t4-t3 + t2-t1:.2f} seconds)')

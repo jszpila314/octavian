@@ -113,6 +113,7 @@ def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
           rank_masks.append(np.isin(ids_sorted, halo_set))
 
       for dataset in datasets:
+        print(ptype, dataset)
         if dataset == 'particle_index':        # <-- add
             data = particle_index[in_halo][order]
         else:

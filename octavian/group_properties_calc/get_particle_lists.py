@@ -5,7 +5,7 @@ if TYPE_CHECKING:
 
 import numpy as np
 import pandas as pd
-
+from time import perf_counter
 
 def get_group_particle_indexes(data_manager: DataManager, group_name: str) -> None:
   config = data_manager.config
@@ -59,12 +59,20 @@ def get_group_particle_indexes(data_manager: DataManager, group_name: str) -> No
     }
 
 def get_particle_lists(data_manager: DataManager) -> None:
+  data_manager.logger.info('Assigning particle lists...')
+  t1 = perf_counter()
+
   config = data_manager.config
 
   data_manager.particle_lists = {group: {} for group in config['groups']}
 
+  t2 = perf_counter()
   for ptype in config['ptypes']:
     data_manager.load_property('particle_index', ptype)
+  t3 = perf_counter()
 
   for group in config['groups']:
     get_group_particle_indexes(data_manager, group)
+
+  t4 = perf_counter()
+  data_manager.logger.info(f'Assigning particle lists done in {t4-t1:.2f} seconds. (Load reduced: {t4-t3 + t2-t1:.2f} seconds)')

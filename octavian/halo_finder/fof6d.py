@@ -231,10 +231,15 @@ def run_fof6d_in_halo(
 
 # vectorised version of caesar fof6d
 def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
+  data_manager.logger.info(f'Running FOF6D...')
+  t1 = perf_counter()
+
   config = data_manager.config
 
+  t2 = perf_counter()
   for ptype in config['ptypes']:
     data_manager.load_property('mass', ptype)
+  t3 = perf_counter()
 
   data_manager.mdm_total = np.sum(data_manager.data['dm']['mass'])
   data_manager.ndm = len(data_manager.data['dm'])
@@ -249,12 +254,14 @@ def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
   fof_LL = data_manager.mis * b
   vel_LL = 1.
 
+  t4 = perf_counter()
   for ptype in config['ptypes']:
     data_manager.load_property('vel', ptype)
 
   # check dense
   for prop in ['rho', 'temperature', 'sfr']:
     data_manager.load_property(prop, 'gas')
+  t5 = perf_counter()
 
   data_manager.data['gas']['temperature'] = 0.
   data_manager.data['gas']['dense_gas'] = (data_manager.data['gas']['rho'] > config['nHlim']) & ((data_manager.data['gas']['temperature'] < config['Tlim']) | (data_manager.data['gas']['sfr'] > 0))
@@ -300,8 +307,6 @@ def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
 
   # unpack results (same logic as before, just reordered)
   galaxies = [g for gals, _ in results for g in gals if len(gals) != 0]
-  all_timings = [t for _, t in results]
-  timings_df = pd.DataFrame(all_timings)
 
   for ptype in config['ptypes']:
     data_manager.data[ptype]['GalID'] = -1
@@ -315,11 +320,16 @@ def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
 
   if np.all(data_manager.data['star']['GalID'] == -1): config['groups'] = ['halos']
 
-  print(f"\n=== FOF6D Timing Summary (rank {data_manager.rank}) ===")
-  print(f"Halos processed: {len(timings_df)}")
-  print(f"Total particles: {timings_df['n_particles'].sum()}")
-  print(timings_df[['sort', 'neighbors', 'weights', 'merge']].sum().to_string())
-  print(f"\nTop 5 halos by total time:")
+  t6 = perf_counter()
+  data_manager.logger.info(f'Running FOF6D done in {t6-t1:.2f} seconds. (Load reduced: {t6-t5 + t4-t3 + t2-t1:.2f} seconds)')
+
+  all_timings = [t for _, t in results]
+  timings_df = pd.DataFrame(all_timings)
+  data_manager.logger.info(f'\n=== FOF6D Timing Summary (rank {data_manager.rank}) ===')
+  data_manager.logger.info(f'Halos processed: {len(timings_df)}')
+  data_manager.logger.info(f'Total particles: {timings_df['n_particles'].sum()}')
+  data_manager.logger.info(timings_df[['sort', 'neighbors', 'weights', 'merge']].sum().to_string())
+  data_manager.logger.info(f'\nTop 5 halos by total time:')
   timings_df['total'] = timings_df[['sort', 'neighbors', 'weights', 'merge']].sum(axis=1)
-  print(timings_df.nlargest(5, 'total').to_string())
-  print("=" * 40)
+  data_manager.logger.info(timings_df.nlargest(5, 'total').to_string())
+  data_manager.logger.info('=' * 40)

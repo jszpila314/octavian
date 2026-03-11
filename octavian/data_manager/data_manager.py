@@ -4,19 +4,33 @@ import h5py
 import unyt
 from astropy.cosmology import FlatLambdaCDM
 from sympy import sympify
-
+from octavian.utils import setup_logger
+from time import perf_counter
 
 class DataManager:
-  def __init__(self, snapfile: str, config: dict, comm=None):
+  def __init__(self, snapfile: str, log_file: str, config: dict, comm=None):
+    t1 = perf_counter()
     # mpi functionality
     self.comm = comm
     self.rank = comm.Get_rank() if comm else 0 # if statement allows for serial case
     self.size = comm.Get_size() if comm else 1
 
     self.snapfile = snapfile
+    self.logger = setup_logger(log_file)
+    if comm:
+      self.logger.info(f'Initialising DataManager on Rank {self.rank}...')
+    else:
+      self.logger.info(f'Initialising DataManager...')
+
     self.initialise_config(config)
     self.initialise_data()
     self.load_simulation_constants()
+    self.load_halo_ids()
+    self.add_ptype_columns()
+
+    t2 = perf_counter()
+    self.logger.info(f'Initialising DataManager done in {t2-t1:.2f} seconds.')
+
 
   # programmatic access to attrs based on https://peps.python.org/pep-0363/
   def __getitem__(self, name):
@@ -154,6 +168,7 @@ class DataManager:
     column = self.get_column_name(prop)
     prop_name = self.get_prop_name(prop)
     ptype_name = self.get_ptype_name(ptype)
+    self.logger.info(f'Loading data: {column}')
 
     with h5py.File(self.snapfile) as f:
       if prop == 'metallicity':

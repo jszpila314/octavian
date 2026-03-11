@@ -75,6 +75,14 @@ def common_group_properties(data_manager: DataManager, group_name: str, particle
     velocities_list.append(df[['vx', 'vy', 'vz']].to_numpy())
 
   # flat arrays
+  # group_ids = np.concatenate([data_manager.data[ptype][groupID_key] for ptype in ptypes])
+  # halo_ids = np.concatenate([data_manager.data[ptype]['HaloID'] for ptype in ptypes])
+  # gal_ids = np.concatenate([data_manager.data[ptype]['GalID'] for ptype in ptypes])
+  # masses = np.concatenate([data_manager.data[ptype]['mass'] for ptype in ptypes])
+  # potentials = np.concatenate([data_manager.data[ptype]['potential'] for ptype in ptypes])
+  # potentials = np.vstack([data_manager.data[ptype][['x', 'y', 'z']] for ptype in ptypes])
+  # velocities = np.vstack([data_manager.data[ptype][['vx', 'vy', 'vz']] for ptype in ptypes])
+
   group_ids = np.concatenate(group_ids_list)
   halo_ids = np.concatenate(halo_ids_list)
   gal_ids = np.concatenate(gal_ids_list)
@@ -509,11 +517,16 @@ def calculate_aperture_masses(data_manager, config):
     group_data['mass_total_30kpc'] = result[:, :len(config['ptypes'])].sum(axis=1)
 
 def calculate_group_properties(data_manager: DataManager) -> None:
+  data_manager.logger.info('Calculating group properties...')
+  t1 = perf_counter()
 
   # admin
   config = data_manager.config
+
+  t2 = perf_counter()
   for ptype in config['ptypes']:
     data_manager.load_property('potential', ptype)
+  t3 = perf_counter()
 
   groups = config['groups']
 
@@ -537,8 +550,10 @@ def calculate_group_properties(data_manager: DataManager) -> None:
 
   # gas properties
   if 'gas' in to_process:
+    t4 = perf_counter()
     for property in ['rho', 'nh', 'fH2', 'metallicity', 'sfr', 'temperature']:
       data_manager.load_property(property, 'gas')
+    t5 = perf_counter()
 
     # gas masses
     data = data_manager.data['gas']
@@ -554,16 +569,20 @@ def calculate_group_properties(data_manager: DataManager) -> None:
 
   # star properties
   if 'star' in to_process:
+    t6 = perf_counter()
     for property in ['age', 'metallicity']:
       data_manager.load_property(property, 'star')
+    t7 = perf_counter()
 
     for group in groups:
       star_group_properties(data_manager, group)
 
   # bh properties
   if 'bh' in to_process:
+    t8 = perf_counter()
     for property in ['bhmdot']:
       data_manager.load_property(property, 'bh')
+    t9 = perf_counter()
       
     for group in groups:
       bh_group_properties(data_manager, group)
@@ -575,3 +594,6 @@ def calculate_group_properties(data_manager: DataManager) -> None:
   # densities
   if 'local_densities' in to_process:
     calculate_local_densities(data_manager)
+
+  t10 = perf_counter()
+  data_manager.logger.info(f'Calculating group properties done in {t10-t1:.2f} seconds. (Load reduced: {t10-t9 + t8-t7 + t6-t5 + t4-t3 + t2-t1:.2f} seconds.)')
