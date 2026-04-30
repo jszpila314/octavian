@@ -1,5 +1,6 @@
 import h5py
 import numpy as np
+from yaml import safe_load
 
 def find_nearest(array, value):
     idx = (np.abs(array - value)).argmin()
@@ -28,7 +29,7 @@ def get_id_filter(f: h5py.File, ptypes: list[str], nsplit: int) -> list[list[int
 
   return id_filter
 
-def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
+def filter_snapshot(snapfile: str, outfile: str, configfile: str, nsplit: int=4):
   """
   Weighted snapshot filter.
 
@@ -40,6 +41,9 @@ def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
   # these are weighting constants. cgp scales better than fof6d so ideally lean towards fof6d
   ALPHA = 0.6 # arbitrary fof6d constant
   BETA = 0.4 # arbitrary cgp constant
+
+  with open(configfile, 'r') as f:
+    config = safe_load(f)
 
   with h5py.File(snapfile, 'r') as f:
     for i in range(nsplit):
@@ -54,7 +58,13 @@ def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
     # initialise weight dictionaries
     star_weights = {}
     gas_weights = {}
-    dm_weights = {} 
+    dm_weights = {}
+
+    # validate halos
+    dm_ids = f['PartType1']['HaloID'][:]
+    dm_ids = dm_ids[dm_ids != 0]
+    valid_halos, halo_size = np.unique(dm_ids, return_counts=True)
+    valid_halos = valid_halos[halo_size >= config['MINIMUM_DM_PER_HALO']]
     
     for ptype_name, weight_dict in [
     ('PartType4', star_weights),
@@ -62,7 +72,7 @@ def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
     ('PartType1', dm_weights),  
     ]: # config is not passed so refer to them by PartType
       ptype_ids = f[ptype_name]['HaloID'][:] # access star/gas particles and their halo IDs
-      ptype_ids = ptype_ids[ptype_ids != 0] # access only the stars/gas in a halo
+      ptype_ids = ptype_ids[np.isin(ptype_ids, valid_halos)] # access only the stars/gas in a valid halo
       unique, counts = np.unique(ptype_ids, return_counts=True) # find the counts of that particle for a unique halo
 
       # find a raw weight
@@ -78,12 +88,12 @@ def filter_snapshot(snapfile: str, outfile: str, nsplit: int=4):
 
     # account for theoretical pure dark matter halo (these still need to be assigned)
     # this could maybe be removed
-    all_ids = set()
-    for ptype in ptypes:
-        ptype_ids = f[ptype]['HaloID'][:]
-        all_ids.update(ptype_ids[ptype_ids != 0])
-    for hid in all_ids:
-        weights.setdefault(hid, 0)
+    # all_ids = set()
+    # for ptype in ptypes:
+    #     ptype_ids = f[ptype]['HaloID'][:]
+    #     all_ids.update(ptype_ids[ptype_ids != 0])
+    # for hid in all_ids:
+    #     weights.setdefault(hid, 0)
 
     # simple sequential binning algorithm
     rank_assignments = [set() for _ in range(nsplit)] # initialise a set
