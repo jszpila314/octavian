@@ -441,7 +441,10 @@ def calculate_local_densities(data_manager: DataManager) -> None:
 
     # REVIEW: moving a FOF6D optimisation into this function
     # previously the pandas .explode() calls were memory-intensive
-    tree = KDTree(pos)
+    boxsize = data_manager.simulation['boxsize']
+    pos = np.where(pos > boxsize, pos - boxsize, pos)
+    pos = np.where(pos < 0, pos + boxsize, pos)
+    tree = KDTree(pos, boxsize=boxsize)
     for radius in [300., 1000., 3000.]:
       volume = 4./3. * np.pi * radius**3
       index_lists = tree.query_ball_point(pos, radius, workers=-1) # workers=-1 means all processors are used (from documentation)
