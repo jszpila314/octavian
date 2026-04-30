@@ -59,12 +59,6 @@ def filter_snapshot(snapfile: str, outfile: str, configfile: str, nsplit: int=4)
     star_weights = {}
     gas_weights = {}
     dm_weights = {}
-
-    # validate halos
-    dm_ids = f['PartType1']['HaloID'][:]
-    dm_ids = dm_ids[dm_ids != 0]
-    valid_halos, halo_size = np.unique(dm_ids, return_counts=True)
-    valid_halos = valid_halos[halo_size >= config['MINIMUM_DM_PER_HALO']]
     
     for ptype_name, weight_dict in [
     ('PartType4', star_weights),
@@ -72,7 +66,7 @@ def filter_snapshot(snapfile: str, outfile: str, configfile: str, nsplit: int=4)
     ('PartType1', dm_weights),  
     ]: # config is not passed so refer to them by PartType
       ptype_ids = f[ptype_name]['HaloID'][:] # access star/gas particles and their halo IDs
-      ptype_ids = ptype_ids[np.isin(ptype_ids, valid_halos)] # access only the stars/gas in a valid halo
+      ptype_ids = ptype_ids[ptype_ids != 0] # access only the stars/gas in a valid halo
       unique, counts = np.unique(ptype_ids, return_counts=True) # find the counts of that particle for a unique halo
 
       # find a raw weight
@@ -82,6 +76,7 @@ def filter_snapshot(snapfile: str, outfile: str, configfile: str, nsplit: int=4)
     weights = {}
     for hid in set(star_weights) | set(gas_weights) | set(dm_weights): # union operator: find halos in both sets
       n_total = star_weights.get(hid, 0) + gas_weights.get(hid, 0) + dm_weights.get(hid, 0)
+      if n_total < config['MINIMUM_DM_PER_HALO']: continue # validate halos
       fof6d_cost = (star_weights.get(hid, 0))**1.2 + gas_weights.get(hid, 0)
       cgp_cost = n_total  # roughly linear in total particles per halo
       weights[hid] = ALPHA * fof6d_cost + BETA * cgp_cost
