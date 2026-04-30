@@ -238,7 +238,10 @@ def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
 
   t2 = perf_counter()
   for ptype in config['ptypes']:
-    data_manager.load_property('mass', ptype)
+    if ptype == 'bh':
+      data_manager.load_property('bhmass', ptype)
+    else:
+      data_manager.load_property('mass', ptype)
   t3 = perf_counter()
 
   data_manager.mdm_total = np.sum(data_manager.data['dm']['mass'])

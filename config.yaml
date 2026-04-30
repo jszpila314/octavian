@@ -140,6 +140,7 @@ dataset_columns:
 prop_columns:
   pos: [x, y, z]
   vel: [vx, vy, vz]
+  'bhmass': 'mass'
 
 groups: [halos, galaxies]
 groupIDs:
