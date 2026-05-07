@@ -155,7 +155,7 @@ def sort_by_group(group_ids):
     
     return order, unique_ids, start, end
 
-def extract_particle_arrays(data_manager, config, include_hydrogen=False):
+def extract_particle_arrays(data_manager, config, include_hydrogen=False, include_dust=False, include_velocities=False):
     """
     Extract flat particle arrays from all ptypes.
     Useful for anytime you want a list of particles, positions, masses and ptypes in a given area (like a halo).
@@ -164,7 +164,7 @@ def extract_particle_arrays(data_manager, config, include_hydrogen=False):
     ptype_names = list(config['ptypes'])
     ptype_to_int = {p: i for i, p in enumerate(ptype_names)}
 
-    pos_list, mass_list, code_list, halo_list = [], [], [], []
+    pos_list, mass_list, code_list, halo_list, vel_list = [], [], [], [], []
 
     for ptype in config['ptypes']:
 
@@ -174,6 +174,8 @@ def extract_particle_arrays(data_manager, config, include_hydrogen=False):
         mass_list.append(df['mass'].to_numpy())
         code_list.append(np.full(n, ptype_to_int[ptype], dtype=np.int32)) # always easier to store ptypes as int rather than str
         halo_list.append(df['HaloID'].to_numpy())
+        if include_velocities:
+            vel_list.append(df[['vx', 'vy', 'vz']].to_numpy())
 
     # this is for aperture_masses currently, not sure whether this is useful
     if include_hydrogen:
@@ -187,11 +189,30 @@ def extract_particle_arrays(data_manager, config, include_hydrogen=False):
             mass_list.append(gas[col].to_numpy())
             code_list.append(np.full(len(gas), ptype_to_int[name], dtype=np.int32))
             halo_list.append(gas_halos)
+            if include_velocities:
+                vel_list.append(gas[['vx', 'vy', 'vz']].to_numpy())
 
-    return (
+    if include_dust and 'gas' in data_manager.data and 'dustmass' in data_manager.data['gas']:
+        gas = data_manager.data['gas']
+        dust_mass = gas['dustmass'].to_numpy().copy()
+        if 'rho' in gas:
+            dust_mass[gas['rho'].to_numpy() < config['nHlim']] = 0.
+        ptype_names.append('dust')
+        ptype_to_int['dust'] = len(ptype_names) - 1
+        pos_list.append(gas[['x', 'y', 'z']].to_numpy())
+        mass_list.append(dust_mass)
+        code_list.append(np.full(len(gas), ptype_to_int['dust'], dtype=np.int32))
+        halo_list.append(gas['HaloID'].to_numpy())
+        if include_velocities:
+            vel_list.append(gas[['vx', 'vy', 'vz']].to_numpy())
+
+    result = (
         np.concatenate(pos_list),
         np.concatenate(mass_list),
         np.concatenate(code_list),
         np.concatenate(halo_list),
         ptype_names,
     )
+    if include_velocities:
+        return result + (np.concatenate(vel_list),)
+    return result

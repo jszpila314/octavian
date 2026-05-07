@@ -1,4 +1,5 @@
 from __future__ import annotations
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
   from octavian.data_manager import DataManager
@@ -7,9 +8,42 @@ import h5py
 import os
 import numpy as np
 from time import perf_counter
+from octavian.utils.dataset_columns import resolve_dataset_columns, resolve_list_dataset_columns
 
 import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+
+def _column_for_group(column, group_name: str):
+  if isinstance(column, Mapping):
+    return column.get(group_name)
+  return column
+
+
+def _has_columns(columns, available_columns) -> bool:
+  if columns is None:
+    return False
+  return bool(np.all(np.isin(columns, available_columns)))
+
+
+def _write_sequence_dataset(hdf5_group, dataset_name: str, values) -> None:
+  sequences = []
+  for value in values:
+    if value is None:
+      sequences.append(np.empty(0, dtype=np.int64))
+    else:
+      sequences.append(np.asarray(value, dtype=np.int64))
+
+  lengths = np.asarray([len(value) for value in sequences], dtype=np.int32)
+  offsets = np.concatenate([[0], np.cumsum(lengths[:-1])]).astype(np.int64)
+  if len(sequences) == 0 or lengths.sum() == 0:
+    indices = np.empty(0, dtype=np.int64)
+  else:
+    indices = np.concatenate(sequences).astype(np.int64, copy=False)
+
+  hdf5_group.create_dataset(f'{dataset_name}_indices', data=indices, compression=1)
+  hdf5_group.create_dataset(f'{dataset_name}_offsets', data=offsets, compression=1)
+  hdf5_group.create_dataset(f'{dataset_name}_lengths', data=lengths, compression=1)
 
 
 def save_group_properties(data_manager: DataManager, filename: str) -> None:
@@ -45,14 +79,26 @@ def save_group_properties(data_manager: DataManager, filename: str) -> None:
         hdf5_group.create_dataset(f'{ptype_list}_lengths', data=pl['lengths'], compression=1)
 
     # write all other datasets
-    for dataset_name, column in config['dataset_columns'].items():
+    for dataset_name, column in resolve_dataset_columns(config).items():
       if dataset_name in ptype_lists:
         continue
 
-      if np.all(np.isin(column, halo_columns)):
-        halo_data.create_dataset(dataset_name, data=data_manager.group_data['halos'][column].to_numpy(), compression=1)
-      if 'galaxies' in config['groups'] and np.all(np.isin(column, galaxy_columns)):
-        galaxy_data.create_dataset(dataset_name, data=data_manager.group_data['galaxies'][column].to_numpy(), compression=1)
+      halo_column = _column_for_group(column, 'halos')
+      if _has_columns(halo_column, halo_columns):
+        halo_data.create_dataset(dataset_name, data=data_manager.group_data['halos'][halo_column].to_numpy(), compression=1)
+
+      galaxy_column = _column_for_group(column, 'galaxies')
+      if 'galaxies' in config['groups'] and _has_columns(galaxy_column, galaxy_columns):
+        galaxy_data.create_dataset(dataset_name, data=data_manager.group_data['galaxies'][galaxy_column].to_numpy(), compression=1)
+
+    for dataset_name, column in resolve_list_dataset_columns(config).items():
+      halo_column = _column_for_group(column, 'halos')
+      if isinstance(halo_column, str) and halo_column in halo_columns:
+        _write_sequence_dataset(halo_data, dataset_name, data_manager.group_data['halos'][halo_column].to_numpy(dtype=object))
+
+      galaxy_column = _column_for_group(column, 'galaxies')
+      if 'galaxies' in config['groups'] and isinstance(galaxy_column, str) and galaxy_column in galaxy_columns:
+        _write_sequence_dataset(galaxy_data, dataset_name, data_manager.group_data['galaxies'][galaxy_column].to_numpy(dtype=object))
 
   t2 = perf_counter()
   data_manager.logger.info(f'Saving datasets done in {t2-t1:.2f} seconds.')

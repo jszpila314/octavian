@@ -2,6 +2,7 @@ import h5py
 import numpy as np
 import warnings
 from yaml import safe_load
+from octavian.utils.dataset_columns import resolve_dataset_columns
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
@@ -42,28 +43,36 @@ def merge_catalogues(files: list[str], outfile: str, configfile: str) -> None:
     halo_group = f_out.create_group('halo_data')
     galaxy_group = f_out.create_group('galaxy_data')
 
-    for dataset in config['dataset_columns'].keys():
+    for dataset in resolve_dataset_columns(config).keys():
       print(dataset)
       if 'groupID' in dataset or 'parent_halo_index' in dataset: continue
       if dataset in ['glist', 'slist', 'dmlist', 'bhlist']: continue # old code guard
       halo_data = []
       galaxy_data = []
+      halo_seen = False
+      galaxy_seen = False
       for file in files:
         with h5py.File(file, 'r') as f:
 
-          try: halo_data.append(f['halo_data'][dataset][:])
+          try:
+            halo_data.append(f['halo_data'][dataset][:])
+            halo_seen = True
           except:
             if '_L' in dataset: halo_data.append(np.full((file_lengths['halos'][file], 3), np.nan))
             else: halo_data.append(np.full(file_lengths['halos'][file], np.nan))
 
           if file_lengths['galaxies'][file] == 0: continue
-          try: galaxy_data.append(f['galaxy_data'][dataset][:])
+          try:
+            galaxy_data.append(f['galaxy_data'][dataset][:])
+            galaxy_seen = True
           except:
             if '_L' in dataset: galaxy_data.append(np.full((file_lengths['galaxies'][file], 3), np.nan))
             else: galaxy_data.append(np.full(file_lengths['galaxies'][file], np.nan))
 
-      halo_group[dataset] = np.concatenate(halo_data)[halo_order]
-      galaxy_group[dataset] = np.concatenate(galaxy_data)[galaxy_order]
+      if halo_seen:
+        halo_group[dataset] = np.concatenate(halo_data)[halo_order]
+      if galaxy_seen:
+        galaxy_group[dataset] = np.concatenate(galaxy_data)[galaxy_order]
 
     halo_ids = np.arange(np.sum(list(file_lengths['halos'].values())))
     halo_group['HaloID'] = halo_ids
@@ -114,5 +123,4 @@ def merge_catalogues(files: list[str], outfile: str, configfile: str) -> None:
         out_group.create_dataset(f'{ptype_list}_indices', data=reordered, compression=1)
         out_group.create_dataset(f'{ptype_list}_offsets', data=merged_offsets, compression=1)
         out_group.create_dataset(f'{ptype_list}_lengths', data=merged_lengths, compression=1)
-
 

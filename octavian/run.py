@@ -7,11 +7,13 @@ from octavian.group_properties_calc import calculate_group_properties, get_parti
 
 from yaml import safe_load
 
-def run(snapshot: str, outfile: str, configfile: str, logfile: str, comm=None):
+def run(snapshot: str, outfile: str, configfile: str, logfile: str | None = None, comm=None):
   with open(configfile, 'r') as f:
     config = safe_load(f)
 
   config['Tlim'] = float(config['Tlim'])
+  if logfile is None:
+    logfile = f'{outfile}.log'
 
   data_manager = DataManager(snapshot, logfile, config, comm=comm)
 

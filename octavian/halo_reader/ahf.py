@@ -161,6 +161,9 @@ def read_ahf_particles_c(filepath, n_estimate=None):
 
 def load_ahf(data_manager, particles_path, halos_path=None, mode='field'):
 
+    data_manager.config['halo_source'] = 'ahf'
+    data_manager.config['halo_mode'] = mode
+
     particles_path = Path(particles_path)
     
     if halos_path is None:

@@ -147,6 +147,9 @@ def load_hbt(data_manager: DataManager, subhalo_path: str, snap_index: int, mode
     data_manager needs to be loaded on the original snapshot for cross-referencing ptypes.
     This also has the option to just do field halos or capture substructure.
     """
+    data_manager.config['halo_source'] = 'hbt'
+    data_manager.config['halo_mode'] = mode
+
     print('Reading HBT+ subhalos...')
     t1 = perf_counter()
     filepath = gather_subsnap_file(subhalo_path, snap_index)

@@ -90,6 +90,7 @@ class DataManager:
       if group == 'galaxies': ids = ids[ids != -1]
 
       self.group_data[group] = pd.DataFrame(index=ids)
+      self.group_data[group][id_column] = ids
 
   def load_simulation_constants(self) -> None:
     self.simulation = {}
@@ -164,13 +165,18 @@ class DataManager:
     for ptype in self.config['ptypes']:
       self.data[ptype]['ptype'] = pd.Series(np.full(len(self.data[ptype]), ptype), dtype='category')
 
-  def load_property(self, prop: str, ptype: str):
+  def load_property(self, prop: str, ptype: str, optional: bool = False, default=0.):
     column = self.get_column_name(prop)
     prop_name = self.get_prop_name(prop)
     ptype_name = self.get_ptype_name(ptype)
     self.logger.info(f'Loading data: {column}')
 
     with h5py.File(self.snapfile) as f:
+      if prop_name not in f[ptype_name]:
+        if optional:
+          self.data[ptype][column] = default
+          return False
+        raise KeyError(f'{prop_name} not found for {ptype_name}')
       if prop == 'metallicity':
         self.data[ptype][column] = f[ptype_name][prop_name][:, 0]
       elif prop == 'age':
@@ -178,4 +184,5 @@ class DataManager:
         self.data[ptype][column] = self.simulation['time_gyr'] - self.cosmology.age(1/data - 1).value
       else:
         self.data[ptype][column] = f[ptype_name][prop_name][:] * self.get_unit_conversion_factor(prop)
+    return True
   
