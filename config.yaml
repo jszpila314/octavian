@@ -12,6 +12,7 @@ ptype_lists:
   bh: bhlist
 
 prop_aliases:
+  pid: ParticleIDs
   particle_index: particle_index
   pos: Coordinates
   vel: Velocities
