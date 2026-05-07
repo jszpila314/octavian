@@ -3,6 +3,7 @@ from time import perf_counter
 from octavian.data_manager import DataManager, save_group_properties
 from octavian.utils import wrap_positions
 from octavian.halo_finder import run_fof6d
+from octavian.halo_reader import load_ahf, load_hbt
 from octavian.group_properties_calc import calculate_group_properties, get_particle_lists
 
 from yaml import safe_load
@@ -18,6 +19,22 @@ def run(snapshot: str, outfile: str, configfile: str, logfile: str | None = None
   data_manager = DataManager(snapshot, logfile, config, comm=comm)
 
   wrap_positions(data_manager)
+
+  halo_source = config.get('halo_source')
+  if halo_source == 'ahf':
+    load_ahf(
+      data_manager,
+      config['ahf_particles_path'],
+      config.get('ahf_halos_path') or None,
+      mode=config.get('halo_mode', 'field'),
+    )
+  elif halo_source == 'hbt':
+    load_hbt(
+      data_manager,
+      config['hbt_subhalo_path'],
+      config['hbt_snap_index'],
+      mode=config.get('halo_mode', 'field'),
+    )
   
   run_fof6d(data_manager, nproc=config.get('nproc', 1))
 
