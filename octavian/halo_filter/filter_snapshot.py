@@ -1,8 +1,9 @@
 import h5py
 import numpy as np
+from time import perf_counter
 from yaml import safe_load
 
-from octavian.halo_reader.ahf import build_ahf_snapshot_chains, read_ahf_membership, _chain_exclusive_ids
+from octavian.halo_reader.ahf import build_ahf_snapshot_chains, _chain_exclusive_ids
 
 def find_nearest(array, value):
     idx = (np.abs(array - value)).argmin()
@@ -109,11 +110,17 @@ def filter_snapshot(snapfile: str, outfile: str, configfile: str, nsplit: int=4)
     if config.get('halo_mode') == 'subhalo':
       if config.get('halo_source') != 'ahf':
         raise NotImplementedError('Subhalo HaloID chains are currently implemented for AHF only')
-      tree, member_hids, member_pids, member_ptypes = read_ahf_membership(
-        config['ahf_particles_path'], config.get('ahf_halos_path') or None
+      t = perf_counter()
+      print('Building AHF subhalo HaloID chains...', flush=True)
+      _, chains, counts = build_ahf_snapshot_chains(
+        f, config, config['ahf_particles_path'], config.get('ahf_halos_path') or None
       )
-      chains = build_ahf_snapshot_chains(f, config, tree, member_hids, member_pids, member_ptypes)
-      return filter_snapshot_with_chains(f, outfile, config, nsplit, chains)
+      print(f'  Built AHF chains: {perf_counter() - t:.1f}s', flush=True)
+      print(f'  AHF memberships written: {int(counts[:4].sum())}, overwritten: {int(counts[7])}', flush=True)
+      t = perf_counter()
+      filter_snapshot_with_chains(f, outfile, config, nsplit, chains)
+      print(f'  Wrote split snapshots: {perf_counter() - t:.1f}s', flush=True)
+      return
 
     for i in range(nsplit):
       with h5py.File(f'{outfile}_{i}.hdf5', 'a') as f_out:

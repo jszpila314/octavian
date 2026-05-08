@@ -6,6 +6,7 @@
 // libraries
 #include <stdio.h>   // file operations: fopen, fgets, fclose
 #include <stdlib.h>  // general utilities
+#include <stdint.h>  // fixed-width integer types
 
 // NOTE: this is a C implementation of the state machine
 
@@ -53,4 +54,119 @@ long parse_ahf_particles(
     }
     fclose(f); // must explicitly close the file 
     return idx; // number of particles we wrote into the array
+}
+
+#define MISSING_ROW UINT32_MAX
+
+static long find_halo_id(int64_t hid, const int64_t *raw_halo_ids, long n_halos)
+{
+    long lo = 0;
+    long hi = n_halos;
+    while (lo < hi) {
+        long mid = lo + (hi - lo) / 2;
+        int64_t val = raw_halo_ids[mid];
+        if (val < hid) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo < n_halos && raw_halo_ids[lo] == hid) return lo;
+    return -1;
+}
+
+static int slot_from_raw_ptype(int64_t raw_ptype)
+{
+    if (raw_ptype == 0) return 0;  // gas
+    if (raw_ptype == 1) return 1;  // dm
+    if (raw_ptype == 4) return 2;  // star
+    if (raw_ptype == 5) return 3;  // bh
+    return -1;
+}
+
+static void fill_chain_value(
+    int32_t *chain,
+    uint32_t row,
+    int width,
+    int depth,
+    int32_t compact_halo_id,
+    uint64_t *counts
+)
+{
+    uint64_t idx = (uint64_t)row * (uint64_t)width + (uint64_t)depth;
+    int32_t old = chain[idx];
+    if (old != -1 && old != compact_halo_id) counts[7]++;
+    chain[idx] = compact_halo_id;
+}
+
+long fill_ahf_chains(
+    const char *filename,
+    const int64_t *raw_halo_ids,
+    const int8_t *halo_depths,
+    long n_halos,
+    const uint32_t *lookup_gas,
+    const uint32_t *lookup_dm,
+    const uint32_t *lookup_star,
+    const uint32_t *lookup_bh,
+    int64_t max_pid,
+    int width,
+    int32_t *chain_gas,
+    int32_t *chain_dm,
+    int32_t *chain_star,
+    int32_t *chain_bh,
+    uint64_t *counts
+)
+{
+    FILE *f = fopen(filename, "r");
+    if (f == NULL) return -1;
+
+    char line[256];
+    int64_t remaining = 0;
+    long current_halo_id = -1;
+    int current_depth = -1;
+    long long a_ll, b_ll;
+    long written = 0;
+
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "%lld %lld", &a_ll, &b_ll) != 2) continue;
+        int64_t a = (int64_t)a_ll;
+        int64_t b = (int64_t)b_ll;
+
+        if (remaining == 0) {
+            remaining = a;
+            current_halo_id = find_halo_id(b, raw_halo_ids, n_halos);
+            current_depth = current_halo_id >= 0 ? (int)halo_depths[current_halo_id] : -1;
+            continue;
+        }
+
+        remaining--;
+        int slot = slot_from_raw_ptype(b);
+        if (slot < 0) {
+            counts[4]++;
+            continue;
+        }
+        if (current_depth < 0 || a < 0 || a > max_pid) {
+            counts[5]++;
+            continue;
+        }
+
+        uint32_t row = MISSING_ROW;
+        if (slot == 0) row = lookup_gas[a];
+        else if (slot == 1) row = lookup_dm[a];
+        else if (slot == 2) row = lookup_star[a];
+        else row = lookup_bh[a];
+
+        if (row == MISSING_ROW) {
+            counts[6]++;
+            continue;
+        }
+
+        if (slot == 0) fill_chain_value(chain_gas, row, width, current_depth, (int32_t)current_halo_id, counts);
+        else if (slot == 1) fill_chain_value(chain_dm, row, width, current_depth, (int32_t)current_halo_id, counts);
+        else if (slot == 2) fill_chain_value(chain_star, row, width, current_depth, (int32_t)current_halo_id, counts);
+        else fill_chain_value(chain_bh, row, width, current_depth, (int32_t)current_halo_id, counts);
+
+        counts[slot]++;
+        written++;
+    }
+
+    fclose(f);
+    return written;
 }

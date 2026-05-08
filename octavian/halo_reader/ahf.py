@@ -52,7 +52,8 @@ def read_ahf_halos(path: Path) -> Tuple[pd.DataFrame, Dict[int, int]]:
 
     # whitespace-delimited rows
     # NOTE: only pandas can handle this (at present March 2026)
-    df = pd.read_csv(path, comment='#', delim_whitespace=True, names=clean_headers)
+    dtypes = {key: np.int64 for key in ('ID', 'hostHalo') if key in clean_headers}
+    df = pd.read_csv(path, comment='#', sep=r'\s+', names=clean_headers, dtype=dtypes)
 
     return df # convert to polars
 
@@ -188,65 +189,128 @@ def read_ahf_membership(particles_path, halos_path=None):
     return HaloTree(halo_ids, parent_ids, properties), member_hids, member_pids, member_ptypes
 
 def _chain_exclusive_ids(chain: np.ndarray) -> np.ndarray:
-    valid = chain >= 0
-    lengths = valid.sum(axis=1)
     out = np.full(len(chain), -1, dtype=np.int64)
-    rows = np.flatnonzero(lengths)
-    out[rows] = chain[rows, lengths[rows] - 1]
+    for col in range(chain.shape[1]):
+        values = chain[:, col]
+        np.copyto(out, values, where=values >= 0)
     return out
 
-def _chain_table(tree: HaloTree) -> np.ndarray:
-    table = np.full((len(tree._id_to_idx), int(tree.depths.max()) + 1), -1, dtype=np.int32)
-    for hid in tree.halo_ids:
-        row = tree._id_to_idx[hid]
-        chain = [int(hid)]
-        parent = int(tree.parent_ids[row])
-        while parent != -1:
-            chain.append(parent)
-            parent = int(tree.parent_ids[tree._id_to_idx[parent]])
-        table[int(hid), :len(chain)] = chain[::-1]
-    return table
+def read_ahf_tree(halos_path):
+    properties = read_ahf_halos(Path(halos_path))
+    raw_halo_ids = properties['ID'].to_numpy(dtype=np.int64)
+    parent_ids = properties['hostHalo'].to_numpy(dtype=np.int64)
+    parent_ids[parent_ids == 0] = -1
+    halo_ids, parent_ids, _ = _remap_ahf_ids(raw_halo_ids, parent_ids, np.empty(0, dtype=np.int64))
+    return HaloTree(halo_ids, parent_ids, properties), np.sort(raw_halo_ids)
 
-def build_ahf_snapshot_chains(snapshot, config, tree, member_hids, member_pids, member_ptypes):
-    table = _chain_table(tree)
-    chains = {}
-    pid_dataset = config.get('prop_aliases', {}).get('pid', 'ParticleIDs')
+def _load_ahf_parser():
+    so_path = Path(__file__).parent / 'ahf_parser.so'
+    if not so_path.exists():
+        raise FileNotFoundError(f'Compiled parser not found at {so_path}. Compile with: gcc -O2 -shared -fPIC -o ahf_parser.so ahf_parser.c')
+    return ctypes.CDLL(str(so_path))
 
+def _scan_max_particle_id(snapshot, config, pid_dataset, chunk_size=20_000_000):
+    max_pid = 0
+    for ptype_name in config['ptype_names'].values():
+        if ptype_name not in snapshot:
+            continue
+        dataset = snapshot[ptype_name][pid_dataset]
+        for start in range(0, len(dataset), chunk_size):
+            pids = dataset[start:start + chunk_size]
+            if len(pids):
+                max_pid = max(max_pid, int(pids.max()))
+    return max_pid
+
+def _build_particle_lookups(snapshot, config, pid_dataset, max_pid, chunk_size=20_000_000):
+    sentinel = np.iinfo(np.uint32).max
+    lookups = [np.full(max_pid + 1, sentinel, dtype=np.uint32) for _ in range(4)]
     for ptype, ptype_name in config['ptype_names'].items():
         if ptype_name not in snapshot:
             continue
+        slot = PTYPE_ENCODE[ptype]
+        dataset = snapshot[ptype_name][pid_dataset]
+        if len(dataset) >= sentinel:
+            raise ValueError(f'{ptype_name} has too many particles for uint32 row lookup')
+        for start in range(0, len(dataset), chunk_size):
+            end = min(start + chunk_size, len(dataset))
+            pids = dataset[start:end]
+            lookups[slot][pids] = np.arange(start, end, dtype=np.uint32)
+    return lookups
 
-        snap_pids = snapshot[ptype_name][pid_dataset][:]
-        chain = np.full((len(snap_pids), table.shape[1]), -1, dtype=np.int32)
-        ptype_code = PTYPE_ENCODE[ptype]
-        ptype_mask = member_ptypes == ptype_code
-        pids = member_pids[ptype_mask]
-        hids = member_hids[ptype_mask]
-        valid = hids >= 0
-        pids = pids[valid]
-        hids = hids[valid]
-
-        if len(pids):
-            order = np.lexsort((-tree._depth_lookup[hids], pids))
-            pids = pids[order]
-            hids = hids[order]
-            keep = np.empty(len(pids), dtype=bool)
-            keep[0] = True
-            keep[1:] = pids[1:] != pids[:-1]
-            pids = pids[keep]
-            hids = hids[keep]
-
-            order = np.argsort(pids)
-            pids = pids[order]
-            hids = hids[order]
-            positions = np.searchsorted(pids, snap_pids)
-            in_bounds = positions < len(pids)
-            matched = np.zeros(len(snap_pids), dtype=bool)
-            matched[in_bounds] = pids[positions[in_bounds]] == snap_pids[in_bounds]
-            chain[matched] = table[hids[positions[matched]]]
-
+def _allocate_chains(snapshot, config, pid_dataset, width):
+    chains = {}
+    by_slot = [np.empty((0, width), dtype=np.int32) for _ in range(4)]
+    for ptype, ptype_name in config['ptype_names'].items():
+        if ptype_name not in snapshot:
+            continue
+        chain = np.full((len(snapshot[ptype_name][pid_dataset]), width), -1, dtype=np.int32)
         chains[ptype_name] = chain
-    return chains
+        by_slot[PTYPE_ENCODE[ptype]] = chain
+    return chains, by_slot
+
+def build_ahf_snapshot_chains(snapshot, config, particles_path, halos_path=None):
+    particles_path = Path(particles_path)
+    if halos_path is None:
+        halos_path = particles_path.with_name(particles_path.name.replace('particles', 'halos'))
+    t = perf_counter()
+    tree, raw_halo_ids = read_ahf_tree(halos_path)
+    print(f'  AHF halo tree: {perf_counter() - t:.1f}s', flush=True)
+    pid_dataset = config.get('prop_aliases', {}).get('pid', 'ParticleIDs')
+    width = int(tree.depths.max()) + 1
+
+    depths_by_halo_id = np.empty(len(raw_halo_ids), dtype=np.int8)
+    depths_by_halo_id[tree.halo_ids] = tree.depths.astype(np.int8)
+
+    t = perf_counter()
+    max_pid = _scan_max_particle_id(snapshot, config, pid_dataset)
+    lookups = _build_particle_lookups(snapshot, config, pid_dataset, max_pid)
+    print(f'  Particle ID lookups: {perf_counter() - t:.1f}s', flush=True)
+    t = perf_counter()
+    chains, chains_by_slot = _allocate_chains(snapshot, config, pid_dataset, width)
+    print(f'  Chain allocation: {perf_counter() - t:.1f}s', flush=True)
+
+    lib = _load_ahf_parser()
+    lib.fill_ahf_chains.restype = ctypes.c_long
+    lib.fill_ahf_chains.argtypes = [
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_int64),
+        ctypes.POINTER(ctypes.c_int8),
+        ctypes.c_long,
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.c_int64,
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_uint64),
+    ]
+    counts = np.zeros(8, dtype=np.uint64)
+    t = perf_counter()
+    written = lib.fill_ahf_chains(
+        str(particles_path).encode(),
+        raw_halo_ids.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),
+        depths_by_halo_id.ctypes.data_as(ctypes.POINTER(ctypes.c_int8)),
+        len(raw_halo_ids),
+        lookups[0].ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
+        lookups[1].ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
+        lookups[2].ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
+        lookups[3].ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
+        max_pid,
+        width,
+        chains_by_slot[0].ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        chains_by_slot[1].ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        chains_by_slot[2].ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        chains_by_slot[3].ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        counts.ctypes.data_as(ctypes.POINTER(ctypes.c_uint64)),
+    )
+    if written < 0:
+        raise IOError(f'Failed to open {particles_path}')
+    print(f'  AHF particle stream: {perf_counter() - t:.1f}s', flush=True)
+    return tree, chains, counts
 
 def load_ahf(data_manager, particles_path, halos_path=None, mode='field'):
 
@@ -263,30 +327,28 @@ def load_ahf(data_manager, particles_path, halos_path=None, mode='field'):
         halos_path = Path(halos_path)
 
     print(f"Loading AHF data...")
-    t1 = perf_counter()
-    tree, member_hids, member_pids, member_ptypes = read_ahf_membership(particles_path, halos_path)
-    t2 = perf_counter()
-    print(f"Finished in {(t2 - t1):.3f} seconds.")
-    
-    print(f"Extracting halo structure and membership...")
     t0 = perf_counter()
-    print(f"  HaloTree: {perf_counter() - t0:.3f}s")
-
-    data_manager.halo_tree = tree
 
     if mode == 'subhalo':
-        t1 = perf_counter()
         with h5py.File(data_manager.snapfile, 'r') as f:
-            chains = build_ahf_snapshot_chains(
-                f, data_manager.config, tree, member_hids, member_pids, member_ptypes
-            )
+            tree, chains, counts = build_ahf_snapshot_chains(f, data_manager.config, particles_path, halos_path)
+        data_manager.halo_tree = tree
         for ptype in data_manager.config['ptypes']:
             ptype_name = data_manager.get_ptype_name(ptype)
             chain = chains[ptype_name]
             data_manager.halo_id_chains[ptype] = chain
             data_manager.data[ptype]['HaloID'] = pd.Series(_chain_exclusive_ids(chain), dtype='category')
-        print(f"  Chain assign: {perf_counter() - t1:.3f}s")
+        print(f"  Chain assign: {perf_counter() - t0:.3f}s")
+        print(f"  AHF memberships written: {int(counts[:4].sum())}, overwritten: {int(counts[7])}")
     else:
+        t1 = perf_counter()
+        tree, member_hids, member_pids, member_ptypes = read_ahf_membership(particles_path, halos_path)
+        print(f"Finished in {(perf_counter() - t1):.3f} seconds.")
+    
+        print(f"Extracting halo structure and membership...")
+        t0 = perf_counter()
+        print(f"  HaloTree: {perf_counter() - t0:.3f}s")
+        data_manager.halo_tree = tree
         reader = HaloReader(data_manager)
         t1 = perf_counter()
         membership = HaloMembership(tree, member_hids, member_pids, member_ptypes, exclusive=False)
