@@ -11,6 +11,7 @@ def merge_catalogues(files: list[str], outfile: str, configfile: str) -> None:
     config = safe_load(f)
 
   galaxy_parent_halo = []
+  halo_source_ids = []
   halo_masses = []
   galaxy_masses = []
   file_lengths = {'halos': {}, 'galaxies': {}}
@@ -24,20 +25,35 @@ def merge_catalogues(files: list[str], outfile: str, configfile: str) -> None:
         file_lengths['galaxies'][file] = 0
 
       halo_masses.append(f['halo_data']['dicts/masses.total'][:])
+      halo_source_ids.append(f['halo_data']['groupID'][:])
       try:
         file_galaxy_masses = f['galaxy_data']['dicts/masses.stellar'][:]
         if len(file_galaxy_masses) != 0:
-          galaxy_parent_halo.append(f['galaxy_data']['parent_halo_index'][:] + len(halo_masses))
+          galaxy_parent_halo.append(f['galaxy_data']['parent_halo_index'][:])
           galaxy_masses.append(file_galaxy_masses)
       except: pass
   print(file_lengths)
   halo_masses = np.concatenate(halo_masses)
+  halo_source_ids = np.concatenate(halo_source_ids)
   galaxy_masses = np.concatenate(galaxy_masses)
   galaxy_parent_halo = np.concatenate(galaxy_parent_halo)
 
   halo_order = np.argsort(halo_masses)
   galaxy_order = np.argsort(galaxy_masses)
-  galaxy_parent_halo = halo_order[galaxy_parent_halo]
+  halo_inverse_order = np.empty(len(halo_order), dtype=np.int64)
+  halo_inverse_order[halo_order] = np.arange(len(halo_order), dtype=np.int64)
+  halo_source_order = np.argsort(halo_source_ids)
+  sorted_halo_source_ids = halo_source_ids[halo_source_order]
+  if np.any(sorted_halo_source_ids[1:] == sorted_halo_source_ids[:-1]):
+    raise ValueError('Cannot merge catalogues with duplicate halo groupID values')
+  parent_positions = np.searchsorted(sorted_halo_source_ids, galaxy_parent_halo)
+  in_bounds = parent_positions < len(sorted_halo_source_ids)
+  matched = np.zeros(len(galaxy_parent_halo), dtype=bool)
+  matched[in_bounds] = sorted_halo_source_ids[parent_positions[in_bounds]] == galaxy_parent_halo[in_bounds]
+  if not np.all(matched):
+    missing = np.unique(galaxy_parent_halo[~matched])
+    raise ValueError(f'Cannot merge catalogues; missing parent halo groupIDs: {missing[:10]}')
+  galaxy_parent_halo = halo_inverse_order[halo_source_order[parent_positions]][galaxy_order]
 
   with h5py.File(outfile, 'w') as f_out:
     halo_group = f_out.create_group('halo_data')
@@ -123,4 +139,3 @@ def merge_catalogues(files: list[str], outfile: str, configfile: str) -> None:
         out_group.create_dataset(f'{ptype_list}_indices', data=reordered, compression=1)
         out_group.create_dataset(f'{ptype_list}_offsets', data=merged_offsets, compression=1)
         out_group.create_dataset(f'{ptype_list}_lengths', data=merged_lengths, compression=1)
-

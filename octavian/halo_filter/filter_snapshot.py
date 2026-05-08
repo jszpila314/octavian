@@ -62,33 +62,43 @@ def filter_snapshot_with_chains(f: h5py.File, outfile: str, config: dict, nsplit
     rank_assignments[lightest].add(hid)
     rank_loads[lightest] += weights[hid]
 
+  max_halo_id = max(weights) if weights else -1
+  rank_lookup = np.full(max_halo_id + 1, -1, dtype=np.int16)
+  for rank, halo_ids in enumerate(rank_assignments):
+    if halo_ids:
+      rank_lookup[np.fromiter(halo_ids, dtype=np.int64)] = rank
+
   for ptype in ptypes:
     chain = chains[ptype]
     ids = chain[:, 0]
     halo_ids = _chain_exclusive_ids(chain)
     particle_index = np.arange(len(ids), dtype='int')
-    in_halo = ids >= 0
-    ids_filtered = ids[in_halo]
-    order = np.argsort(ids_filtered)
-    ids_sorted = ids_filtered[order]
+    assigned = np.zeros(len(ids), dtype=bool)
+    in_lookup = (ids >= 0) & (ids < len(rank_lookup))
+    assigned[in_lookup] = rank_lookup[ids[in_lookup]] >= 0
+    rank_ids = rank_lookup[ids[assigned]]
     datasets = [dataset for dataset in f[ptype].keys() if dataset not in ('HaloID', 'HaloID_chain', 'particle_index')]
     datasets += ['HaloID', 'HaloID_chain', 'particle_index']
-    rank_masks = [np.isin(ids_sorted, np.array(list(rank_assignments[i]))) for i in range(nsplit)]
+    rank_masks = [rank_ids == i for i in range(nsplit)]
 
-    for dataset in datasets:
-      print(ptype, dataset)
-      if dataset == 'HaloID':
-        data = halo_ids[in_halo][order]
-      elif dataset == 'HaloID_chain':
-        data = chain[in_halo][order]
-      elif dataset == 'particle_index':
-        data = particle_index[in_halo][order]
-      else:
-        data = f[ptype][dataset][:][in_halo][order]
-      for i in range(nsplit):
-        with h5py.File(f'{outfile}_{i}.hdf5', 'a') as f_out:
+    out_files = [h5py.File(f'{outfile}_{i}.hdf5', 'a') for i in range(nsplit)]
+    try:
+      for dataset in datasets:
+        print(ptype, dataset, flush=True)
+        if dataset == 'HaloID':
+          data = halo_ids[assigned]
+        elif dataset == 'HaloID_chain':
+          data = chain[assigned]
+        elif dataset == 'particle_index':
+          data = particle_index[assigned]
+        else:
+          data = f[ptype][dataset][:][assigned]
+        for i, f_out in enumerate(out_files):
           f_out.require_group(ptype)
           f_out[ptype][dataset] = data[rank_masks[i]]
+    finally:
+      for f_out in out_files:
+        f_out.close()
 
 def filter_snapshot(snapfile: str, outfile: str, configfile: str, nsplit: int=4):
   """

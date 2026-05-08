@@ -64,6 +64,7 @@ class DataManager:
   def initialise_data(self) -> None:
     self.data = {}
     self.halo_id_chains = {}
+    self.halo_membership_rows = {}
     
     ptypes = self.config['ptypes']
     
@@ -168,9 +169,13 @@ class DataManager:
   def get_halo_membership_rows(self, ptype: str) -> tuple[np.ndarray, np.ndarray]:
     if ptype not in self.halo_id_chains:
       return self.get_halo_ids(ptype), np.arange(len(self.data[ptype]))
+    if ptype in self.halo_membership_rows:
+      return self.halo_membership_rows[ptype]
     chain = self.halo_id_chains[ptype]
     particle_rows, chain_cols = np.nonzero(chain >= 0)
-    return chain[particle_rows, chain_cols].astype(np.int64, copy=False), particle_rows
+    rows = (chain[particle_rows, chain_cols], particle_rows)
+    self.halo_membership_rows[ptype] = rows
+    return rows
   
   def get_unit_conversion_factor(self, prop: str) -> float:
     try:
