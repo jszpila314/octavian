@@ -2,6 +2,8 @@ import h5py
 import numpy as np
 from yaml import safe_load
 
+from octavian.halo_reader.ahf import build_ahf_snapshot_chains, read_ahf_membership, _chain_exclusive_ids
+
 def find_nearest(array, value):
     idx = (np.abs(array - value)).argmin()
     return array[idx]
@@ -29,6 +31,64 @@ def get_id_filter(f: h5py.File, ptypes: list[str], nsplit: int) -> list[list[int
 
   return id_filter
 
+def filter_snapshot_with_chains(f: h5py.File, outfile: str, config: dict, nsplit: int, chains: dict[str, np.ndarray]):
+  for i in range(nsplit):
+    with h5py.File(f'{outfile}_{i}.hdf5', 'a') as f_out:
+      f.copy(f['Header'], f_out, 'Header')
+
+  ptypes = list(chains)
+  star_weights, gas_weights, dm_weights = {}, {}, {}
+  for ptype_name, weight_dict in [('PartType4', star_weights), ('PartType0', gas_weights), ('PartType1', dm_weights)]:
+    if ptype_name not in chains:
+      continue
+    top_ids = chains[ptype_name][:, 0]
+    unique, counts = np.unique(top_ids[top_ids >= 0], return_counts=True)
+    for hid, count in zip(unique, counts):
+      weight_dict[hid] = count
+
+  weights = {}
+  for hid in set(star_weights) | set(gas_weights) | set(dm_weights):
+    n_total = star_weights.get(hid, 0) + gas_weights.get(hid, 0) + dm_weights.get(hid, 0)
+    if n_total < config['MINIMUM_DM_PER_HALO']: continue
+    fof6d_cost = (star_weights.get(hid, 0))**1.2 + gas_weights.get(hid, 0)
+    cgp_cost = n_total
+    weights[hid] = 0.6 * fof6d_cost + 0.4 * cgp_cost
+
+  rank_assignments = [set() for _ in range(nsplit)]
+  rank_loads = [0] * nsplit
+  for hid in sorted(weights, key=weights.get, reverse=True):
+    lightest = np.argmin(rank_loads)
+    rank_assignments[lightest].add(hid)
+    rank_loads[lightest] += weights[hid]
+
+  for ptype in ptypes:
+    chain = chains[ptype]
+    ids = chain[:, 0]
+    halo_ids = _chain_exclusive_ids(chain)
+    particle_index = np.arange(len(ids), dtype='int')
+    in_halo = ids >= 0
+    ids_filtered = ids[in_halo]
+    order = np.argsort(ids_filtered)
+    ids_sorted = ids_filtered[order]
+    datasets = [dataset for dataset in f[ptype].keys() if dataset not in ('HaloID', 'HaloID_chain', 'particle_index')]
+    datasets += ['HaloID', 'HaloID_chain', 'particle_index']
+    rank_masks = [np.isin(ids_sorted, np.array(list(rank_assignments[i]))) for i in range(nsplit)]
+
+    for dataset in datasets:
+      print(ptype, dataset)
+      if dataset == 'HaloID':
+        data = halo_ids[in_halo][order]
+      elif dataset == 'HaloID_chain':
+        data = chain[in_halo][order]
+      elif dataset == 'particle_index':
+        data = particle_index[in_halo][order]
+      else:
+        data = f[ptype][dataset][:][in_halo][order]
+      for i in range(nsplit):
+        with h5py.File(f'{outfile}_{i}.hdf5', 'a') as f_out:
+          f_out.require_group(ptype)
+          f_out[ptype][dataset] = data[rank_masks[i]]
+
 def filter_snapshot(snapfile: str, outfile: str, configfile: str, nsplit: int=4):
   """
   Weighted snapshot filter.
@@ -46,6 +106,15 @@ def filter_snapshot(snapfile: str, outfile: str, configfile: str, nsplit: int=4)
     config = safe_load(f)
 
   with h5py.File(snapfile, 'r') as f:
+    if config.get('halo_mode') == 'subhalo':
+      if config.get('halo_source') != 'ahf':
+        raise NotImplementedError('Subhalo HaloID chains are currently implemented for AHF only')
+      tree, member_hids, member_pids, member_ptypes = read_ahf_membership(
+        config['ahf_particles_path'], config.get('ahf_halos_path') or None
+      )
+      chains = build_ahf_snapshot_chains(f, config, tree, member_hids, member_pids, member_ptypes)
+      return filter_snapshot_with_chains(f, outfile, config, nsplit, chains)
+
     for i in range(nsplit):
       with h5py.File(f'{outfile}_{i}.hdf5', 'a') as f_out:
         f.copy(f['Header'], f_out, 'Header')

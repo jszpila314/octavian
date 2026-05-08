@@ -19,10 +19,11 @@ import gzip
 from pathlib import Path
 from time import perf_counter
 
+import h5py
 import numpy as np
 import pandas as pd
 
-from octavian.halo_reader.halo_utils import HaloMembership, HaloReader, HaloTree
+from octavian.halo_reader.halo_utils import HaloMembership, HaloReader, HaloTree, PTYPE_ENCODE
 
 # AHF assigns ptype codes, we change these to ptype names for Octavian compatibility
 _PTYPE_MAP = {0: 0, # gas
@@ -159,6 +160,94 @@ def read_ahf_particles_c(filepath, n_estimate=None):
     
     return out_hids[:n].copy(), out_pids[:n].copy(), result_ptypes.copy()
 
+def _remap_ahf_ids(halo_ids, parent_ids, member_hids):
+    unique_raw = np.unique(halo_ids)
+    halo_ids = np.searchsorted(unique_raw, halo_ids)
+    valid_parents = parent_ids != -1
+    parent_pos = np.searchsorted(unique_raw, parent_ids[valid_parents])
+    parent_matched = unique_raw[np.clip(parent_pos, 0, len(unique_raw) - 1)] == parent_ids[valid_parents]
+    new_parent_ids = np.full_like(parent_ids, -1)
+    new_parent_ids[valid_parents] = np.where(parent_matched, parent_pos, -1)
+    member_pos = np.searchsorted(unique_raw, member_hids)
+    matched = unique_raw[np.clip(member_pos, 0, len(unique_raw) - 1)] == member_hids
+    return halo_ids, new_parent_ids, np.where(matched, member_pos, -1)
+
+def read_ahf_membership(particles_path, halos_path=None):
+    particles_path = Path(particles_path)
+    if halos_path is None:
+        halos_path = particles_path.with_name(particles_path.name.replace('particles', 'halos'))
+    else:
+        halos_path = Path(halos_path)
+
+    properties = read_ahf_halos(halos_path)
+    member_hids, member_pids, member_ptypes = read_ahf_particles_c(particles_path)
+    halo_ids = properties['ID'].to_numpy().astype(np.int64)
+    parent_ids = properties['hostHalo'].to_numpy().astype(np.int64)
+    parent_ids[parent_ids == 0] = -1
+    halo_ids, parent_ids, member_hids = _remap_ahf_ids(halo_ids, parent_ids, member_hids)
+    return HaloTree(halo_ids, parent_ids, properties), member_hids, member_pids, member_ptypes
+
+def _chain_exclusive_ids(chain: np.ndarray) -> np.ndarray:
+    valid = chain >= 0
+    lengths = valid.sum(axis=1)
+    out = np.full(len(chain), -1, dtype=np.int64)
+    rows = np.flatnonzero(lengths)
+    out[rows] = chain[rows, lengths[rows] - 1]
+    return out
+
+def _chain_table(tree: HaloTree) -> np.ndarray:
+    table = np.full((len(tree._id_to_idx), int(tree.depths.max()) + 1), -1, dtype=np.int32)
+    for hid in tree.halo_ids:
+        row = tree._id_to_idx[hid]
+        chain = [int(hid)]
+        parent = int(tree.parent_ids[row])
+        while parent != -1:
+            chain.append(parent)
+            parent = int(tree.parent_ids[tree._id_to_idx[parent]])
+        table[int(hid), :len(chain)] = chain[::-1]
+    return table
+
+def build_ahf_snapshot_chains(snapshot, config, tree, member_hids, member_pids, member_ptypes):
+    table = _chain_table(tree)
+    chains = {}
+    pid_dataset = config.get('prop_aliases', {}).get('pid', 'ParticleIDs')
+
+    for ptype, ptype_name in config['ptype_names'].items():
+        if ptype_name not in snapshot:
+            continue
+
+        snap_pids = snapshot[ptype_name][pid_dataset][:]
+        chain = np.full((len(snap_pids), table.shape[1]), -1, dtype=np.int32)
+        ptype_code = PTYPE_ENCODE[ptype]
+        ptype_mask = member_ptypes == ptype_code
+        pids = member_pids[ptype_mask]
+        hids = member_hids[ptype_mask]
+        valid = hids >= 0
+        pids = pids[valid]
+        hids = hids[valid]
+
+        if len(pids):
+            order = np.lexsort((-tree._depth_lookup[hids], pids))
+            pids = pids[order]
+            hids = hids[order]
+            keep = np.empty(len(pids), dtype=bool)
+            keep[0] = True
+            keep[1:] = pids[1:] != pids[:-1]
+            pids = pids[keep]
+            hids = hids[keep]
+
+            order = np.argsort(pids)
+            pids = pids[order]
+            hids = hids[order]
+            positions = np.searchsorted(pids, snap_pids)
+            in_bounds = positions < len(pids)
+            matched = np.zeros(len(snap_pids), dtype=bool)
+            matched[in_bounds] = pids[positions[in_bounds]] == snap_pids[in_bounds]
+            chain[matched] = table[hids[positions[matched]]]
+
+        chains[ptype_name] = chain
+    return chains
+
 def load_ahf(data_manager, particles_path, halos_path=None, mode='field'):
 
     data_manager.config['halo_source'] = 'ahf'
@@ -175,35 +264,36 @@ def load_ahf(data_manager, particles_path, halos_path=None, mode='field'):
 
     print(f"Loading AHF data...")
     t1 = perf_counter()
-    properties = read_ahf_halos(halos_path)
-    member_hids, member_pids, member_ptypes = read_ahf_particles_c(particles_path)
+    tree, member_hids, member_pids, member_ptypes = read_ahf_membership(particles_path, halos_path)
     t2 = perf_counter()
     print(f"Finished in {(t2 - t1):.3f} seconds.")
     
-    halo_ids = properties['ID'].to_numpy().astype(np.int64)
-    parent_ids = properties['hostHalo'].to_numpy().astype(np.int64)
-    parent_ids[parent_ids == 0] = -1 # AHF sets field halos equal to 0 but we want them as -1
-    
     print(f"Extracting halo structure and membership...")
     t0 = perf_counter()
-    reader = HaloReader(data_manager)
-    print("Remapping IDs...")
-    t1 = perf_counter()
-    halo_ids, parent_ids, member_hids = reader.remap_ids(halo_ids, parent_ids, member_hids)
-    print(f"  Remap: {perf_counter() - t1:.3f}s")
-
-    t1 = perf_counter()
-    tree = HaloTree(halo_ids, parent_ids, properties)
-    print(f"  HaloTree: {perf_counter() - t1:.3f}s")
-
-    t1 = perf_counter()
-    membership = HaloMembership(tree, member_hids, member_pids, member_ptypes, exclusive=False)
-    print(f"  HaloMembership: {perf_counter() - t1:.3f}s")
+    print(f"  HaloTree: {perf_counter() - t0:.3f}s")
 
     data_manager.halo_tree = tree
-    data_manager.halo_membership = membership
 
-    t1 = perf_counter()
-    reader.assign(membership, mode)
-    print(f"  Assign: {perf_counter() - t1:.3f}s")
+    if mode == 'subhalo':
+        t1 = perf_counter()
+        with h5py.File(data_manager.snapfile, 'r') as f:
+            chains = build_ahf_snapshot_chains(
+                f, data_manager.config, tree, member_hids, member_pids, member_ptypes
+            )
+        for ptype in data_manager.config['ptypes']:
+            ptype_name = data_manager.get_ptype_name(ptype)
+            chain = chains[ptype_name]
+            data_manager.halo_id_chains[ptype] = chain
+            data_manager.data[ptype]['HaloID'] = pd.Series(_chain_exclusive_ids(chain), dtype='category')
+        print(f"  Chain assign: {perf_counter() - t1:.3f}s")
+    else:
+        reader = HaloReader(data_manager)
+        t1 = perf_counter()
+        membership = HaloMembership(tree, member_hids, member_pids, member_ptypes, exclusive=False)
+        data_manager.halo_membership = membership
+        print(f"  HaloMembership: {perf_counter() - t1:.3f}s")
+
+        t1 = perf_counter()
+        reader.assign(membership, mode)
+        print(f"  Assign: {perf_counter() - t1:.3f}s")
     print(f"Finished in {(perf_counter() - t0):.3f} seconds.")

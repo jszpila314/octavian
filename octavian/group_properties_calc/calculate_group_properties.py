@@ -47,6 +47,11 @@ def _safe_divide(numerator, denominator, fill=np.nan):
   result = np.full(np.broadcast_shapes(numerator.shape, denominator.shape), fill, dtype=float)
   return np.divide(numerator, denominator, out=result, where=denominator != 0)
 
+def _group_ids_and_rows(data_manager: DataManager, group_name: str, ptype: str, df, groupID_key: str):
+  if group_name == 'halos' and ptype in data_manager.halo_id_chains:
+    return data_manager.get_halo_membership_rows(ptype)
+  return df[groupID_key].to_numpy(), slice(None)
+
 
 def _ahf_lineage_for_ids(tree, source_halo_ids, output_halo_ids):
   source_halo_ids = np.asarray(source_halo_ids, dtype=np.int64)
@@ -265,13 +270,14 @@ def common_group_properties(data_manager: DataManager, group_name: str, particle
   # cast the required data to numpy.
   for ptype in ptypes:
     df = data_manager.data[ptype]
-    group_ids_list.append(df[groupID_key].to_numpy())
-    halo_ids_list.append(df['HaloID'].to_numpy())
-    gal_ids_list.append(df['GalID'].to_numpy())
-    masses_list.append(df['mass'].to_numpy())
-    potentials_list.append(df['potential'].to_numpy())
-    positions_list.append(df[['x', 'y', 'z']].to_numpy())
-    velocities_list.append(df[['vx', 'vy', 'vz']].to_numpy())
+    group_ids, rows = _group_ids_and_rows(data_manager, group_name, ptype, df, groupID_key)
+    group_ids_list.append(group_ids)
+    halo_ids_list.append(df['HaloID'].to_numpy()[rows])
+    gal_ids_list.append(df['GalID'].to_numpy()[rows])
+    masses_list.append(df['mass'].to_numpy()[rows])
+    potentials_list.append(df['potential'].to_numpy()[rows])
+    positions_list.append(df[['x', 'y', 'z']].to_numpy()[rows])
+    velocities_list.append(df[['vx', 'vy', 'vz']].to_numpy()[rows])
 
   # flat arrays
   # group_ids = np.concatenate([data_manager.data[ptype][groupID_key] for ptype in ptypes])
@@ -489,15 +495,15 @@ def gas_group_properties(data_manager: DataManager, group_name: str) -> None:
 
   # load relevant quantities
   df = data_manager.data['gas']
-  group_ids = df[groupID_key].to_numpy()
-  masses = df['mass'].to_numpy()
-  metallicities = df['metallicity'].to_numpy()
-  sfrs = df['sfr'].to_numpy()
-  temperatures = df['temperature'].to_numpy()
-  rhos = df['rho'].to_numpy()
-  mass_HI = df['mass_HI'].to_numpy()
-  mass_H2 = df['mass_H2'].to_numpy()
-  dust_masses = df['dustmass'].to_numpy() if 'dustmass' in df else np.zeros(len(df))
+  group_ids, rows = _group_ids_and_rows(data_manager, group_name, 'gas', df, groupID_key)
+  masses = df['mass'].to_numpy()[rows]
+  metallicities = df['metallicity'].to_numpy()[rows]
+  sfrs = df['sfr'].to_numpy()[rows]
+  temperatures = df['temperature'].to_numpy()[rows]
+  rhos = df['rho'].to_numpy()[rows]
+  mass_HI = df['mass_HI'].to_numpy()[rows]
+  mass_H2 = df['mass_H2'].to_numpy()[rows]
+  dust_masses = df['dustmass'].to_numpy()[rows] if 'dustmass' in df else np.zeros(len(group_ids))
 
   if group_name == 'galaxies':
     keep = df['GalID'].to_numpy() != -1
@@ -588,10 +594,10 @@ def star_group_properties(data_manager: DataManager, group_name: str) -> None:
   groupID_key = config['groupIDs'][group_name]
 
   df = data_manager.data['star']
-  group_ids = df[groupID_key].to_numpy()
-  masses = df['mass'].to_numpy()
-  metallicities = df['metallicity'].to_numpy()
-  ages = df['age'].to_numpy()
+  group_ids, rows = _group_ids_and_rows(data_manager, group_name, 'star', df, groupID_key)
+  masses = df['mass'].to_numpy()[rows]
+  metallicities = df['metallicity'].to_numpy()[rows]
+  ages = df['age'].to_numpy()[rows]
 
   if group_name == 'galaxies':
       keep = df['GalID'].to_numpy() != -1
@@ -631,9 +637,9 @@ def bh_group_properties(data_manager: DataManager, group_name: str) -> None:
   groupID_key = config['groupIDs'][group_name]
 
   df = data_manager.data['bh']
-  group_ids = df[groupID_key].to_numpy()
-  masses = df['mass'].to_numpy()
-  bhmdots = df['bhmdot'].to_numpy()
+  group_ids, rows = _group_ids_and_rows(data_manager, group_name, 'bh', df, groupID_key)
+  masses = df['mass'].to_numpy()[rows]
+  bhmdots = df['bhmdot'].to_numpy()[rows]
 
   if group_name == 'galaxies':
       keep = df['GalID'].to_numpy() != -1

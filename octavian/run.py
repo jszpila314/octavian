@@ -18,23 +18,25 @@ def run(snapshot: str, outfile: str, configfile: str, logfile: str | None = None
 
   data_manager = DataManager(snapshot, logfile, config, comm=comm)
 
-  wrap_positions(data_manager)
-
   halo_source = config.get('halo_source')
-  if halo_source == 'ahf':
+  halo_mode = config.get('halo_mode', 'field')
+  staged_subhalo_membership = halo_mode == 'subhalo' and bool(data_manager.halo_id_chains)
+  if halo_source == 'ahf' and not staged_subhalo_membership:
     load_ahf(
       data_manager,
       config['ahf_particles_path'],
       config.get('ahf_halos_path') or None,
-      mode=config.get('halo_mode', 'field'),
+      mode=halo_mode,
     )
   elif halo_source == 'hbt':
     load_hbt(
       data_manager,
       config['hbt_subhalo_path'],
       config['hbt_snap_index'],
-      mode=config.get('halo_mode', 'field'),
+      mode=halo_mode,
     )
+
+  wrap_positions(data_manager)
   
   run_fof6d(data_manager, nproc=config.get('nproc', 1))
 
