@@ -81,25 +81,77 @@ static int slot_from_raw_ptype(int64_t raw_ptype)
     return -1;
 }
 
-static void fill_chain_value(
+static int chain_depth(const int32_t *values, int width)
+{
+    int depth = -1;
+    for (int col = 0; col < width; col++) {
+        if (values[col] >= 0) depth = col;
+    }
+    return depth;
+}
+
+static void clear_after(int32_t *values, int width, int depth)
+{
+    for (int col = depth + 1; col < width; col++) {
+        values[col] = -1;
+    }
+}
+
+static void copy_candidate(int32_t *chain, const int32_t *candidate, int width, int depth)
+{
+    for (int col = 0; col <= depth; col++) {
+        chain[col] = candidate[col];
+    }
+    clear_after(chain, width, depth);
+}
+
+static int is_prefix(const int32_t *prefix, int prefix_depth, const int32_t *chain, int chain_depth)
+{
+    if (prefix_depth > chain_depth) return 0;
+    for (int col = 0; col <= prefix_depth; col++) {
+        if (prefix[col] != chain[col]) return 0;
+    }
+    return 1;
+}
+
+static void choose_chain_value(
     int32_t *chain,
     uint32_t row,
     int width,
-    int depth,
-    int32_t compact_halo_id,
+    const int32_t *candidate,
     uint64_t *counts
 )
 {
-    uint64_t idx = (uint64_t)row * (uint64_t)width + (uint64_t)depth;
-    int32_t old = chain[idx];
-    if (old != -1 && old != compact_halo_id) counts[7]++;
-    chain[idx] = compact_halo_id;
+    int candidate_depth = chain_depth(candidate, width);
+    if (candidate_depth < 0) return;
+
+    int32_t *current = chain + (uint64_t)row * (uint64_t)width;
+    int current_depth = chain_depth(current, width);
+    if (current_depth < 0) {
+        copy_candidate(current, candidate, width, candidate_depth);
+        return;
+    }
+
+    if (is_prefix(current, current_depth, candidate, candidate_depth)) {
+        copy_candidate(current, candidate, width, candidate_depth);
+        return;
+    } else if (is_prefix(candidate, candidate_depth, current, current_depth)) {
+        return;
+    }
+
+    counts[7]++;
+    if (
+        candidate_depth > current_depth ||
+        (candidate_depth == current_depth && candidate[candidate_depth] < current[current_depth])
+    ) {
+        copy_candidate(current, candidate, width, candidate_depth);
+    }
 }
 
 long fill_ahf_chains(
     const char *filename,
     const int64_t *raw_halo_ids,
-    const int8_t *halo_depths,
+    const int32_t *ancestor_chains,
     long n_halos,
     const uint32_t *lookup_gas,
     const uint32_t *lookup_dm,
@@ -120,7 +172,6 @@ long fill_ahf_chains(
     char line[256];
     int64_t remaining = 0;
     long current_halo_id = -1;
-    int current_depth = -1;
     long long a_ll, b_ll;
     long written = 0;
 
@@ -132,7 +183,6 @@ long fill_ahf_chains(
         if (remaining == 0) {
             remaining = a;
             current_halo_id = find_halo_id(b, raw_halo_ids, n_halos);
-            current_depth = current_halo_id >= 0 ? (int)halo_depths[current_halo_id] : -1;
             continue;
         }
 
@@ -142,7 +192,7 @@ long fill_ahf_chains(
             counts[4]++;
             continue;
         }
-        if (current_depth < 0 || a < 0 || a > max_pid) {
+        if (current_halo_id < 0 || a < 0 || a > max_pid) {
             counts[5]++;
             continue;
         }
@@ -158,10 +208,11 @@ long fill_ahf_chains(
             continue;
         }
 
-        if (slot == 0) fill_chain_value(chain_gas, row, width, current_depth, (int32_t)current_halo_id, counts);
-        else if (slot == 1) fill_chain_value(chain_dm, row, width, current_depth, (int32_t)current_halo_id, counts);
-        else if (slot == 2) fill_chain_value(chain_star, row, width, current_depth, (int32_t)current_halo_id, counts);
-        else fill_chain_value(chain_bh, row, width, current_depth, (int32_t)current_halo_id, counts);
+        const int32_t *candidate = ancestor_chains + (uint64_t)current_halo_id * (uint64_t)width;
+        if (slot == 0) choose_chain_value(chain_gas, row, width, candidate, counts);
+        else if (slot == 1) choose_chain_value(chain_dm, row, width, candidate, counts);
+        else if (slot == 2) choose_chain_value(chain_star, row, width, candidate, counts);
+        else choose_chain_value(chain_bh, row, width, candidate, counts);
 
         counts[slot]++;
         written++;

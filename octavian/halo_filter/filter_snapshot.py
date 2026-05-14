@@ -126,7 +126,7 @@ def filter_snapshot(snapfile: str, outfile: str, configfile: str, nsplit: int=4)
         f, config, config['ahf_particles_path'], config.get('ahf_halos_path') or None
       )
       print(f'  Built AHF chains: {perf_counter() - t:.1f}s', flush=True)
-      print(f'  AHF memberships written: {int(counts[:4].sum())}, overwritten: {int(counts[7])}', flush=True)
+      print(f'  AHF memberships written: {int(counts[:4].sum())}, conflicts resolved: {int(counts[7])}', flush=True)
       t = perf_counter()
       filter_snapshot_with_chains(f, outfile, config, nsplit, chains)
       print(f'  Wrote split snapshots: {perf_counter() - t:.1f}s', flush=True)

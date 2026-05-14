@@ -195,6 +195,18 @@ def _chain_exclusive_ids(chain: np.ndarray) -> np.ndarray:
         np.copyto(out, values, where=values >= 0)
     return out
 
+def _build_halo_ancestor_chains(tree: HaloTree, width: int) -> np.ndarray:
+    chains = np.full((len(tree._id_to_idx), width), -1, dtype=np.int32)
+    for halo_id in tree.halo_ids:
+        current = int(halo_id)
+        while current != -1:
+            row = tree._id_to_idx[current]
+            if row == -1:
+                break
+            chains[int(halo_id), int(tree.depths[row])] = current
+            current = int(tree.parent_ids[row])
+    return chains
+
 def read_ahf_tree(halos_path):
     properties = read_ahf_halos(Path(halos_path))
     raw_halo_ids = properties['ID'].to_numpy(dtype=np.int64)
@@ -257,9 +269,7 @@ def build_ahf_snapshot_chains(snapshot, config, particles_path, halos_path=None)
     print(f'  AHF halo tree: {perf_counter() - t:.1f}s', flush=True)
     pid_dataset = config.get('prop_aliases', {}).get('pid', 'ParticleIDs')
     width = int(tree.depths.max()) + 1
-
-    depths_by_halo_id = np.empty(len(raw_halo_ids), dtype=np.int8)
-    depths_by_halo_id[tree.halo_ids] = tree.depths.astype(np.int8)
+    ancestor_chains = _build_halo_ancestor_chains(tree, width)
 
     t = perf_counter()
     max_pid = _scan_max_particle_id(snapshot, config, pid_dataset)
@@ -274,7 +284,7 @@ def build_ahf_snapshot_chains(snapshot, config, particles_path, halos_path=None)
     lib.fill_ahf_chains.argtypes = [
         ctypes.c_char_p,
         ctypes.POINTER(ctypes.c_int64),
-        ctypes.POINTER(ctypes.c_int8),
+        ctypes.POINTER(ctypes.c_int32),
         ctypes.c_long,
         ctypes.POINTER(ctypes.c_uint32),
         ctypes.POINTER(ctypes.c_uint32),
@@ -293,7 +303,7 @@ def build_ahf_snapshot_chains(snapshot, config, particles_path, halos_path=None)
     written = lib.fill_ahf_chains(
         str(particles_path).encode(),
         raw_halo_ids.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),
-        depths_by_halo_id.ctypes.data_as(ctypes.POINTER(ctypes.c_int8)),
+        ancestor_chains.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
         len(raw_halo_ids),
         lookups[0].ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
         lookups[1].ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
@@ -339,7 +349,7 @@ def load_ahf(data_manager, particles_path, halos_path=None, mode='field'):
             data_manager.halo_id_chains[ptype] = chain
             data_manager.data[ptype]['HaloID'] = pd.Series(_chain_exclusive_ids(chain), dtype='category')
         print(f"  Chain assign: {perf_counter() - t0:.3f}s")
-        print(f"  AHF memberships written: {int(counts[:4].sum())}, overwritten: {int(counts[7])}")
+        print(f"  AHF memberships written: {int(counts[:4].sum())}, conflicts resolved: {int(counts[7])}")
     else:
         t1 = perf_counter()
         tree, member_hids, member_pids, member_ptypes = read_ahf_membership(particles_path, halos_path)
