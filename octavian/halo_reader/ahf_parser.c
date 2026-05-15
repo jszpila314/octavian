@@ -81,7 +81,7 @@ static int slot_from_raw_ptype(int64_t raw_ptype)
     return -1;
 }
 
-static int chain_depth(const int32_t *values, int width)
+static int membership_depth(const int32_t *values, int width)
 {
     int depth = -1;
     for (int col = 0; col < width; col++) {
@@ -97,36 +97,36 @@ static void clear_after(int32_t *values, int width, int depth)
     }
 }
 
-static void copy_candidate(int32_t *chain, const int32_t *candidate, int width, int depth)
+static void copy_candidate(int32_t *membership_array, const int32_t *candidate, int width, int depth)
 {
     for (int col = 0; col <= depth; col++) {
-        chain[col] = candidate[col];
+        membership_array[col] = candidate[col];
     }
-    clear_after(chain, width, depth);
+    clear_after(membership_array, width, depth);
 }
 
-static int is_prefix(const int32_t *prefix, int prefix_depth, const int32_t *chain, int chain_depth)
+static int is_prefix(const int32_t *prefix, int prefix_depth, const int32_t *membership_array, int array_depth)
 {
-    if (prefix_depth > chain_depth) return 0;
+    if (prefix_depth > array_depth) return 0;
     for (int col = 0; col <= prefix_depth; col++) {
-        if (prefix[col] != chain[col]) return 0;
+        if (prefix[col] != membership_array[col]) return 0;
     }
     return 1;
 }
 
-static void choose_chain_value(
-    int32_t *chain,
+static void choose_membership_value(
+    int32_t *membership_array,
     uint32_t row,
     int width,
     const int32_t *candidate,
     uint64_t *counts
 )
 {
-    int candidate_depth = chain_depth(candidate, width);
+    int candidate_depth = membership_depth(candidate, width);
     if (candidate_depth < 0) return;
 
-    int32_t *current = chain + (uint64_t)row * (uint64_t)width;
-    int current_depth = chain_depth(current, width);
+    int32_t *current = membership_array + (uint64_t)row * (uint64_t)width;
+    int current_depth = membership_depth(current, width);
     if (current_depth < 0) {
         copy_candidate(current, candidate, width, candidate_depth);
         return;
@@ -148,10 +148,10 @@ static void choose_chain_value(
     }
 }
 
-long fill_ahf_chains(
+long fill_ahf_membership_arrays(
     const char *filename,
     const int64_t *raw_halo_ids,
-    const int32_t *ancestor_chains,
+    const int32_t *ancestor_arrays,
     long n_halos,
     const uint32_t *lookup_gas,
     const uint32_t *lookup_dm,
@@ -159,10 +159,10 @@ long fill_ahf_chains(
     const uint32_t *lookup_bh,
     int64_t max_pid,
     int width,
-    int32_t *chain_gas,
-    int32_t *chain_dm,
-    int32_t *chain_star,
-    int32_t *chain_bh,
+    int32_t *array_gas,
+    int32_t *array_dm,
+    int32_t *array_star,
+    int32_t *array_bh,
     uint64_t *counts
 )
 {
@@ -208,11 +208,11 @@ long fill_ahf_chains(
             continue;
         }
 
-        const int32_t *candidate = ancestor_chains + (uint64_t)current_halo_id * (uint64_t)width;
-        if (slot == 0) choose_chain_value(chain_gas, row, width, candidate, counts);
-        else if (slot == 1) choose_chain_value(chain_dm, row, width, candidate, counts);
-        else if (slot == 2) choose_chain_value(chain_star, row, width, candidate, counts);
-        else choose_chain_value(chain_bh, row, width, candidate, counts);
+        const int32_t *candidate = ancestor_arrays + (uint64_t)current_halo_id * (uint64_t)width;
+        if (slot == 0) choose_membership_value(array_gas, row, width, candidate, counts);
+        else if (slot == 1) choose_membership_value(array_dm, row, width, candidate, counts);
+        else if (slot == 2) choose_membership_value(array_star, row, width, candidate, counts);
+        else choose_membership_value(array_bh, row, width, candidate, counts);
 
         counts[slot]++;
         written++;

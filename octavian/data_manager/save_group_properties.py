@@ -41,9 +41,9 @@ def _write_sequence_dataset(hdf5_group, dataset_name: str, values) -> None:
   else:
     indices = np.concatenate(sequences).astype(np.int64, copy=False)
 
-  hdf5_group.create_dataset(f'{dataset_name}_indices', data=indices, compression=1)
-  hdf5_group.create_dataset(f'{dataset_name}_offsets', data=offsets, compression=1)
-  hdf5_group.create_dataset(f'{dataset_name}_lengths', data=lengths, compression=1)
+  hdf5_group.create_dataset(f'{dataset_name}_indices', data=indices)
+  hdf5_group.create_dataset(f'{dataset_name}_offsets', data=offsets)
+  hdf5_group.create_dataset(f'{dataset_name}_lengths', data=lengths)
 
 
 def save_group_properties(data_manager: DataManager, filename: str) -> None:
@@ -74,9 +74,9 @@ def save_group_properties(data_manager: DataManager, filename: str) -> None:
         if ptype_list not in data_manager.particle_lists[group_name]:
           continue
         pl = data_manager.particle_lists[group_name][ptype_list]
-        hdf5_group.create_dataset(f'{ptype_list}_indices', data=pl['indices'], compression=1)
-        hdf5_group.create_dataset(f'{ptype_list}_offsets', data=pl['offsets'], compression=1)
-        hdf5_group.create_dataset(f'{ptype_list}_lengths', data=pl['lengths'], compression=1)
+        hdf5_group.create_dataset(f'{ptype_list}_indices', data=pl['indices'])
+        hdf5_group.create_dataset(f'{ptype_list}_offsets', data=pl['offsets'])
+        hdf5_group.create_dataset(f'{ptype_list}_lengths', data=pl['lengths'])
 
     # write all other datasets
     for dataset_name, column in resolve_dataset_columns(config).items():
@@ -85,11 +85,11 @@ def save_group_properties(data_manager: DataManager, filename: str) -> None:
 
       halo_column = _column_for_group(column, 'halos')
       if _has_columns(halo_column, halo_columns):
-        halo_data.create_dataset(dataset_name, data=data_manager.group_data['halos'][halo_column].to_numpy(), compression=1)
+        halo_data.create_dataset(dataset_name, data=data_manager.group_data['halos'][halo_column].to_numpy())
 
       galaxy_column = _column_for_group(column, 'galaxies')
       if 'galaxies' in config['groups'] and _has_columns(galaxy_column, galaxy_columns):
-        galaxy_data.create_dataset(dataset_name, data=data_manager.group_data['galaxies'][galaxy_column].to_numpy(), compression=1)
+        galaxy_data.create_dataset(dataset_name, data=data_manager.group_data['galaxies'][galaxy_column].to_numpy())
 
     for dataset_name, column in resolve_list_dataset_columns(config).items():
       halo_column = _column_for_group(column, 'halos')

@@ -63,7 +63,7 @@ class DataManager:
 
   def initialise_data(self) -> None:
     self.data = {}
-    self.halo_id_chains = {}
+    self.halo_id_arrays = {}
     self.halo_membership_rows = {}
     
     ptypes = self.config['ptypes']
@@ -86,7 +86,7 @@ class DataManager:
       ids = []
       for ptype in ptypes:
         id_column = groupIDs[group]
-        if group == 'halos' and ptype in self.halo_id_chains:
+        if group == 'halos' and ptype in self.halo_id_arrays:
           halo_ids, _ = self.get_halo_membership_rows(ptype)
           ids.append(halo_ids)
         else:
@@ -153,27 +153,27 @@ class DataManager:
     with h5py.File(self.snapfile) as f:
       for ptype in self.config['ptypes']:
         ptype_name = self.get_ptype_name(ptype)
-        if 'HaloID_chain' in f[ptype_name]:
-          self.halo_id_chains[ptype] = f[ptype_name]['HaloID_chain'][:].astype(np.int32, copy=False)
+        if 'HaloID_array' in f[ptype_name]:
+          self.halo_id_arrays[ptype] = f[ptype_name]['HaloID_array'][:].astype(np.int32, copy=False)
         self.data[ptype]['HaloID'] = pd.Series(f[ptype_name]['HaloID'][:], dtype='category')
 
   def get_halo_ids(self, ptype: str, mode: str = 'exclusive') -> np.ndarray:
     if mode == 'exclusive':
       return self.data[ptype]['HaloID'].to_numpy()
     if mode == 'top':
-      if ptype not in self.halo_id_chains:
-        raise KeyError(f'HaloID_chain not loaded for {ptype}')
-      return self.halo_id_chains[ptype][:, 0]
+      if ptype not in self.halo_id_arrays:
+        raise KeyError(f'HaloID_array not loaded for {ptype}')
+      return self.halo_id_arrays[ptype][:, 0]
     raise ValueError(f'Unsupported HaloID mode: {mode}')
 
   def get_halo_membership_rows(self, ptype: str) -> tuple[np.ndarray, np.ndarray]:
-    if ptype not in self.halo_id_chains:
+    if ptype not in self.halo_id_arrays:
       return self.get_halo_ids(ptype), np.arange(len(self.data[ptype]))
     if ptype in self.halo_membership_rows:
       return self.halo_membership_rows[ptype]
-    chain = self.halo_id_chains[ptype]
-    particle_rows, chain_cols = np.nonzero(chain >= 0)
-    rows = (chain[particle_rows, chain_cols], particle_rows)
+    halo_id_array = self.halo_id_arrays[ptype]
+    particle_rows, array_cols = np.nonzero(halo_id_array >= 0)
+    rows = (halo_id_array[particle_rows, array_cols], particle_rows)
     self.halo_membership_rows[ptype] = rows
     return rows
   

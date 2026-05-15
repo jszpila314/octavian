@@ -20,7 +20,7 @@ def run(snapshot: str, outfile: str, configfile: str, logfile: str | None = None
 
   halo_source = config.get('halo_source')
   halo_mode = config.get('halo_mode', 'field')
-  staged_subhalo_membership = halo_mode == 'subhalo' and bool(data_manager.halo_id_chains)
+  staged_subhalo_membership = halo_mode == 'subhalo' and bool(data_manager.halo_id_arrays)
   if halo_source == 'ahf' and not staged_subhalo_membership:
     load_ahf(
       data_manager,

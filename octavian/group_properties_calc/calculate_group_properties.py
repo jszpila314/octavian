@@ -14,14 +14,21 @@ from time import perf_counter
 from scipy.spatial import KDTree
 
 from octavian.group_properties_calc.group_computations import (
+    accumulate_membership_array_common_first,
+    accumulate_membership_array_common_second,
+    accumulate_membership_array_rotation,
     compute_angular_momentum,
     compute_aperture_component_properties,
     compute_central_galaxy_flags,
     compute_gas_scalar_sums,
+    compute_membership_array_bh_max,
+    compute_membership_array_gas_scalar_sums,
+    compute_membership_array_star_scalar_sums,
     compute_rotation_quantities,
     compute_radial_quantiles_and_rmax,
     compute_star_scalar_sums,
     compute_virial_quantities,
+    flatten_membership_array_radius_mass,
 )
 
 from octavian.group_properties_calc.group_helpers import (
@@ -48,9 +55,28 @@ def _safe_divide(numerator, denominator, fill=np.nan):
   return np.divide(numerator, denominator, out=result, where=denominator != 0)
 
 def _group_ids_and_rows(data_manager: DataManager, group_name: str, ptype: str, df, groupID_key: str):
-  if group_name == 'halos' and ptype in data_manager.halo_id_chains:
+  if group_name == 'halos' and ptype in data_manager.halo_id_arrays:
     return data_manager.get_halo_membership_rows(ptype)
   return df[groupID_key].to_numpy(), slice(None)
+
+
+def _group_index_map(group_data) -> np.ndarray:
+  group_ids = group_data.index.to_numpy(dtype=np.int64)
+  valid = group_ids >= 0
+  if not np.any(valid):
+    return np.empty(0, dtype=np.int64)
+  group_map = np.full(int(group_ids[valid].max()) + 1, -1, dtype=np.int64)
+  group_map[group_ids[valid]] = np.flatnonzero(valid).astype(np.int64)
+  return group_map
+
+
+def _uses_halo_id_arrays(data_manager: DataManager, group_name: str, ptypes: list[str]) -> bool:
+  if group_name != 'halos' or not data_manager.halo_id_arrays:
+    return False
+  missing = [ptype for ptype in ptypes if ptype not in data_manager.halo_id_arrays]
+  if missing:
+    raise KeyError(f'HaloID_array missing for halo ptypes: {missing}')
+  return True
 
 
 def _ahf_lineage_for_ids(tree, source_halo_ids, output_halo_ids):
@@ -117,7 +143,7 @@ def _ahf_lineage_for_ids(tree, source_halo_ids, output_halo_ids):
   )
 
 
-def _ahf_ancestor_chains(tree, source_halo_ids):
+def _ahf_ancestor_halo_ids(tree, source_halo_ids):
   source_halo_ids = np.asarray(source_halo_ids, dtype=np.int64)
   if len(tree.halo_ids) == 0:
     return [np.empty(0, dtype=np.int64) for _ in source_halo_ids]
@@ -130,31 +156,31 @@ def _ahf_ancestor_chains(tree, source_halo_ids):
   original_by_halo_id = np.full(max_halo_id, -1, dtype=np.int64)
   original_by_halo_id[tree.halo_ids] = original_ids
 
-  chains = []
+  ancestor_halo_ids = []
   for source_halo_id in source_halo_ids:
     if source_halo_id < 0 or source_halo_id >= max_halo_id:
-      chains.append(np.empty(0, dtype=np.int64))
+      ancestor_halo_ids.append(np.empty(0, dtype=np.int64))
       continue
 
     row = tree._id_to_idx[source_halo_id]
     if row == -1:
-      chains.append(np.empty(0, dtype=np.int64))
+      ancestor_halo_ids.append(np.empty(0, dtype=np.int64))
       continue
 
-    chain = []
+    ancestors = []
     seen = set()
     parent = tree.parent_ids[row]
     while parent != -1 and parent not in seen and 0 <= parent < max_halo_id:
       parent_row = tree._id_to_idx[parent]
       if parent_row == -1:
         break
-      chain.append(original_by_halo_id[parent])
+      ancestors.append(original_by_halo_id[parent])
       seen.add(parent)
       parent = tree.parent_ids[parent_row]
 
-    chains.append(np.asarray(chain, dtype=np.int64))
+    ancestor_halo_ids.append(np.asarray(ancestors, dtype=np.int64))
 
-  return chains
+  return ancestor_halo_ids
 
 
 def _assign_halo_source_properties(data_manager: DataManager) -> None:
@@ -182,7 +208,7 @@ def _assign_halo_source_properties(data_manager: DataManager) -> None:
   halo_data['caesar_parent_halo_index'] = caesar_parent_halo_index
   halo_data['caesar_top_halo_index'] = caesar_top_halo_index
   halo_data['AHF_ancestor_haloIDs'] = pd.Series(
-      _ahf_ancestor_chains(tree, halo_ids), index=halo_data.index, dtype=object
+      _ahf_ancestor_halo_ids(tree, halo_ids), index=halo_data.index, dtype=object
   )
   halo_data['child'] = caesar_parent_halo_index != -1
 
@@ -208,7 +234,7 @@ def _assign_halo_source_properties(data_manager: DataManager) -> None:
   galaxy_data['caesar_parent_halo_index'] = caesar_parent_halo_index
   galaxy_data['caesar_top_halo_index'] = caesar_top_halo_index
   galaxy_data['AHF_ancestor_haloIDs'] = pd.Series(
-      _ahf_ancestor_chains(tree, galaxy_source_halo_ids), index=galaxy_data.index, dtype=object
+      _ahf_ancestor_halo_ids(tree, galaxy_source_halo_ids), index=galaxy_data.index, dtype=object
   )
 
 
@@ -240,6 +266,177 @@ def _assign_central_galaxies(data_manager: DataManager) -> None:
   galaxy_data['central'] = central
 
 
+def _common_halo_array_properties(data_manager: DataManager, particle_type: str, ptypes: list[str]) -> None:
+  group_data = data_manager.group_data['halos']
+  n_groups = len(group_data)
+  group_map = _group_index_map(group_data)
+  mass_mode = 1 if particle_type == 'bh' else 0
+  do_minpot = particle_type == 'total'
+
+  counts = np.zeros(n_groups, dtype=np.int64)
+  group_mass = np.full(n_groups, -np.inf if mass_mode else 0., dtype=float)
+  pos_mass_sum = np.zeros((n_groups, 3))
+  vel_mass_sum = np.zeros((n_groups, 3))
+  min_potential = np.full(n_groups, np.inf)
+  minpot_position = np.full((n_groups, 3), np.nan)
+  minpot_velocity = np.full((n_groups, 3), np.nan)
+
+  for ptype in ptypes:
+    df = data_manager.data[ptype]
+    accumulate_membership_array_common_first(
+        data_manager.halo_id_arrays[ptype],
+        group_map,
+        df[['x', 'y', 'z']].to_numpy(),
+        df[['vx', 'vy', 'vz']].to_numpy(),
+        df['mass'].to_numpy(),
+        df['potential'].to_numpy(),
+        counts,
+        group_mass,
+        pos_mass_sum,
+        vel_mass_sum,
+        min_potential,
+        minpot_position,
+        minpot_velocity,
+        mass_mode,
+        do_minpot,
+    )
+
+  if counts.sum() == 0:
+    return
+  if mass_mode:
+    group_mass[~np.isfinite(group_mass)] = 0.
+
+  group_data[f'n{particle_type}'] = counts
+  group_data[f'mass_{particle_type}'] = group_mass
+
+  if do_minpot:
+    valid = np.isfinite(min_potential)
+    minpot_position[~valid] = np.nan
+    minpot_velocity[~valid] = np.nan
+    for i, d in enumerate(['x', 'y', 'z']):
+      group_data[f'minpot_{d}'] = minpot_position[:, i]
+      group_data[f'minpot_v{d}'] = minpot_velocity[:, i]
+
+  com_positions = _safe_divide(pos_mass_sum, group_mass[:, None])
+  com_velocities = _safe_divide(vel_mass_sum, group_mass[:, None])
+  for i, d in enumerate(['x', 'y', 'z']):
+    group_data[f'{d}_{particle_type}'] = com_positions[:, i]
+  for i, d in enumerate(['x', 'y', 'z']):
+    group_data[f'v{d}_{particle_type}'] = com_velocities[:, i]
+
+  if particle_type == 'total':
+    ref_positions = minpot_position
+    ref_velocities = minpot_velocity
+  else:
+    ref_positions = group_data[['minpot_x', 'minpot_y', 'minpot_z']].to_numpy()
+    ref_velocities = group_data[['minpot_vx', 'minpot_vy', 'minpot_vz']].to_numpy()
+
+  disp_sums = np.zeros(n_groups)
+  L = np.zeros((n_groups, 3))
+  for ptype in ptypes:
+    df = data_manager.data[ptype]
+    accumulate_membership_array_common_second(
+        data_manager.halo_id_arrays[ptype],
+        group_map,
+        df[['x', 'y', 'z']].to_numpy(),
+        df[['vx', 'vy', 'vz']].to_numpy(),
+        df['mass'].to_numpy(),
+        ref_positions,
+        ref_velocities,
+        com_velocities,
+        disp_sums,
+        L,
+    )
+
+  group_data[f'velocity_dispersion_{particle_type}'] = np.sqrt(_safe_divide(disp_sums, counts))
+  for i, d in enumerate(['x', 'y', 'z']):
+    group_data[f'L{d}_{particle_type}'] = L[:, i]
+
+  L_mag = np.linalg.norm(L, axis=1)
+  group_data[f'L_{particle_type}'] = L_mag
+  group_data[f'ALPHA_{particle_type}'] = np.arctan2(L[:, 1], L[:, 2])
+  group_data[f'BETA_{particle_type}'] = np.arcsin(_safe_divide(L[:, 0], L_mag))
+
+  counter_mass = np.zeros(n_groups)
+  krot = np.zeros(n_groups)
+  ktot = np.zeros(n_groups)
+  for ptype in ptypes:
+    df = data_manager.data[ptype]
+    accumulate_membership_array_rotation(
+        data_manager.halo_id_arrays[ptype],
+        group_map,
+        df[['x', 'y', 'z']].to_numpy(),
+        df[['vx', 'vy', 'vz']].to_numpy(),
+        df['mass'].to_numpy(),
+        ref_positions,
+        ref_velocities,
+        L,
+        counter_mass,
+        krot,
+        ktot,
+    )
+
+  group_data[f'BoverT_{particle_type}'] = _safe_divide(2 * counter_mass, group_mass)
+  group_data[f'kappa_rot_{particle_type}'] = _safe_divide(krot, ktot)
+
+  angular_cols = [
+    f'velocity_dispersion_{particle_type}',
+    f'Lx_{particle_type}', f'Ly_{particle_type}', f'Lz_{particle_type}',
+    f'BoverT_{particle_type}', f'kappa_rot_{particle_type}',
+    ]
+  small = counts < 3
+  for col in angular_cols:
+    vals = group_data[col].to_numpy().copy()
+    vals[small] = 0.
+    group_data[col] = vals
+
+  radial_group_idx, radial_radii, radial_masses = [], [], []
+  for ptype in ptypes:
+    df = data_manager.data[ptype]
+    group_idx, radii, masses = flatten_membership_array_radius_mass(
+        data_manager.halo_id_arrays[ptype],
+        group_map,
+        df[['x', 'y', 'z']].to_numpy(),
+        df['mass'].to_numpy(),
+        ref_positions,
+    )
+    radial_group_idx.append(group_idx)
+    radial_radii.append(radii)
+    radial_masses.append(masses)
+
+  group_idx = np.concatenate(radial_group_idx)
+  radii = np.concatenate(radial_radii)
+  masses = np.concatenate(radial_masses)
+  quantiles = np.array([0.2, 0.5, 0.8])
+  radial_results, radius_rmax = compute_radial_quantiles_and_rmax(
+      radii, masses, group_idx, n_groups, quantiles
+  )
+
+  for q, col_name in enumerate(['r20', 'half_mass', 'r80']):
+    group_data[f'radius_{particle_type}_{col_name}'] = radial_results[:, q]
+  group_data[f'radius_{particle_type}_rmax'] = radius_rmax
+
+  if particle_type == 'total':
+    group_data['r200'] = data_manager.simulation['r200_factor'] * group_mass**(1/3)
+    G_factor = unyt.G.to('(km**2 * kpc)/(Msun * s**2)').d
+    group_data['circular_velocity'] = np.sqrt(G_factor * group_mass / group_data['r200'])
+    group_data['temperature'] = 3.6e5 * (group_data['circular_velocity'] / 100.0)**2
+    group_data['spin_param'] = _safe_divide(
+        L_mag,
+        np.sqrt(2) * group_mass * group_data['circular_velocity'].to_numpy() * group_data['r200'].to_numpy()
+    )
+
+    rhocrit = (
+        data_manager.simulation['rhocrit'] *
+        data_manager.create_unit_quantity('rhocrit')
+    ).to('Msun / (kpc*a)**3').d
+    factors = np.array([200., 500., 2500.])
+    virial_r, virial_m = compute_virial_quantities(radii, masses, group_idx, n_groups, rhocrit, factors)
+    for f, factor in enumerate([200, 500, 2500]):
+      group_data[f'radius_{factor}_c'] = virial_r[:, f]
+      group_data[f'mass_{factor}_c'] = virial_m[:, f]
+
+
 def common_group_properties(data_manager: DataManager, group_name: str, particle_type: str) -> None:
   """
   Computes properties common to all particle types.
@@ -259,6 +456,10 @@ def common_group_properties(data_manager: DataManager, group_name: str, particle
       ptypes = config['ptypes_baryon']
   else:
       ptypes = [particle_type]
+
+  if _uses_halo_id_arrays(data_manager, group_name, ptypes):
+    _common_halo_array_properties(data_manager, particle_type, ptypes)
+    return
 
   # ids: groups, halos, galaxies
   group_ids_list, halo_ids_list, gal_ids_list = [], [], []
@@ -495,6 +696,61 @@ def gas_group_properties(data_manager: DataManager, group_name: str) -> None:
 
   # load relevant quantities
   df = data_manager.data['gas']
+
+  if _uses_halo_id_arrays(data_manager, group_name, ['gas']):
+    n_groups = len(group_data)
+    group_map = _group_index_map(group_data)
+    dust_masses = df['dustmass'].to_numpy() if 'dustmass' in df else np.zeros(len(df))
+    (
+      _group_mass_sum,
+      gas_HI,
+      gas_H2,
+      dust_mass,
+      ndust,
+      sfr_sum,
+      metal_mass,
+      metal_sfr,
+      temp_mass,
+      cgm_mass_sum,
+      cgm_temp_mass,
+      cgm_temp_metal,
+      cgm_metal_mass,
+    ) = compute_membership_array_gas_scalar_sums(
+        data_manager.halo_id_arrays['gas'],
+        group_map,
+        df['mass'].to_numpy(),
+        df['metallicity'].to_numpy(),
+        df['sfr'].to_numpy(),
+        df['temperature'].to_numpy(),
+        df['rho'].to_numpy(),
+        df['mass_HI'].to_numpy(),
+        df['mass_H2'].to_numpy(),
+        dust_masses,
+        n_groups,
+        config['nHlim'],
+    )
+
+    group_data['mass_HI'] = gas_HI
+    group_data['mass_H2'] = gas_H2
+    group_data['mass_dust'] = dust_mass
+    group_data['ndust'] = ndust
+    group_data['mass_HI_ism'] = gas_HI
+    group_data['mass_H2_ism'] = gas_H2
+    group_data['sfr'] = sfr_sum
+
+    group_mass = group_data[f'mass_gas'].to_numpy()
+    group_sfr = group_data['sfr'].to_numpy()
+    group_data['metallicity_mass_weighted'] = _safe_divide(metal_mass, group_mass)
+    group_data['metallicity_sfr_weighted'] = _safe_divide(metal_sfr, group_sfr)
+    group_data['mass_cgm'] = cgm_mass_sum
+    cgm_mass = group_data['mass_cgm'].to_numpy()
+    group_data['temp_mass_weighted'] = _safe_divide(temp_mass, group_mass)
+    group_data['temp_mass_weighted_cgm'] = _safe_divide(cgm_temp_mass, cgm_mass)
+    group_data['temp_metal_weighted_cgm'] = _safe_divide(cgm_temp_metal, cgm_temp_mass)
+    group_data['metallicity_mass_weighted_cgm'] = _safe_divide(cgm_metal_mass, cgm_mass)
+    group_data['metallicity_temp_weighted_cgm'] = _safe_divide(cgm_temp_metal, cgm_metal_mass)
+    return
+
   group_ids, rows = _group_ids_and_rows(data_manager, group_name, 'gas', df, groupID_key)
   masses = df['mass'].to_numpy()[rows]
   metallicities = df['metallicity'].to_numpy()[rows]
@@ -594,6 +850,24 @@ def star_group_properties(data_manager: DataManager, group_name: str) -> None:
   groupID_key = config['groupIDs'][group_name]
 
   df = data_manager.data['star']
+
+  if _uses_halo_id_arrays(data_manager, group_name, ['star']):
+    n_groups = len(group_data)
+    total_mass, metal_mass, age_mass, age_metal, young_mass = compute_membership_array_star_scalar_sums(
+        data_manager.halo_id_arrays['star'],
+        _group_index_map(group_data),
+        df['mass'].to_numpy(),
+        df['metallicity'].to_numpy(),
+        df['age'].to_numpy(),
+        n_groups,
+    )
+    group_data['metallicity_stellar'] = _safe_divide(metal_mass, total_mass)
+    group_mass_star = group_data['mass_star'].to_numpy()
+    group_data['age_mass_weighted'] = _safe_divide(age_mass, group_mass_star)
+    group_data['age_metal_weighted'] = _safe_divide(age_metal, metal_mass)
+    group_data['sfr_100'] = young_mass / 100.e6
+    return
+
   group_ids, rows = _group_ids_and_rows(data_manager, group_name, 'star', df, groupID_key)
   masses = df['mass'].to_numpy()[rows]
   metallicities = df['metallicity'].to_numpy()[rows]
@@ -637,6 +911,25 @@ def bh_group_properties(data_manager: DataManager, group_name: str) -> None:
   groupID_key = config['groupIDs'][group_name]
 
   df = data_manager.data['bh']
+
+  if _uses_halo_id_arrays(data_manager, group_name, ['bh']):
+    n_groups = len(group_data)
+    masses = df['mass'].to_numpy()
+    max_mass, bhmdot = compute_membership_array_bh_max(
+        data_manager.halo_id_arrays['bh'],
+        _group_index_map(group_data),
+        masses,
+        df['bhmdot'].to_numpy(),
+        n_groups,
+    )
+    max_mass[~np.isfinite(max_mass)] = np.nan
+    group_data['bhmdot'] = bhmdot
+
+    FRAD = 0.1
+    edd_factor = (4 * np.pi * const.G * const.m_p / (FRAD * const.c * const.sigma_T)).to('1/yr').value
+    group_data['bh_fedd'] = _safe_divide(bhmdot, edd_factor * max_mass)
+    return
+
   group_ids, rows = _group_ids_and_rows(data_manager, group_name, 'bh', df, groupID_key)
   masses = df['mass'].to_numpy()[rows]
   bhmdots = df['bhmdot'].to_numpy()[rows]
@@ -833,6 +1126,7 @@ def calculate_group_properties(data_manager: DataManager) -> None:
   drop_after = {'dm', 'gas', 'star', 'bh'}
 
   # common group properties
+  phase_start = perf_counter()
   for ptype in ptype_order:
       if ptype not in to_process:
           continue
@@ -840,11 +1134,13 @@ def calculate_group_properties(data_manager: DataManager) -> None:
           common_group_properties(data_manager, group, ptype)
       if ptype in drop_after:
           data_manager.data[ptype].drop(columns=columns_to_drop, inplace=True, errors='ignore')
+  data_manager.logger.info(f'Common group properties done in {perf_counter() - phase_start:.2f} seconds.')
 
   _assign_central_galaxies(data_manager)
 
   # gas properties
   if 'gas' in to_process:
+    phase_start = perf_counter()
     t4 = perf_counter()
     for property in ['rho', 'nh', 'fH2', 'metallicity', 'sfr', 'temperature']:
       data_manager.load_property(property, 'gas')
@@ -862,9 +1158,11 @@ def calculate_group_properties(data_manager: DataManager) -> None:
 
     for group in groups:
       gas_group_properties(data_manager, group)
+    data_manager.logger.info(f'Gas group properties done in {perf_counter() - phase_start:.2f} seconds.')
 
   # star properties
   if 'star' in to_process:
+    phase_start = perf_counter()
     t6 = perf_counter()
     for property in ['age', 'metallicity']:
       data_manager.load_property(property, 'star')
@@ -872,9 +1170,11 @@ def calculate_group_properties(data_manager: DataManager) -> None:
 
     for group in groups:
       star_group_properties(data_manager, group)
+    data_manager.logger.info(f'Star group properties done in {perf_counter() - phase_start:.2f} seconds.')
 
   # bh properties
   if 'bh' in to_process:
+    phase_start = perf_counter()
     t8 = perf_counter()
     for property in ['bhmdot']:
       data_manager.load_property(property, 'bh')
@@ -882,10 +1182,13 @@ def calculate_group_properties(data_manager: DataManager) -> None:
       
     for group in groups:
       bh_group_properties(data_manager, group)
+    data_manager.logger.info(f'BH group properties done in {perf_counter() - phase_start:.2f} seconds.')
 
   # apertures
   if 'apertures' in to_process and 'galaxies' in config['groups']:
+    phase_start = perf_counter()
     calculate_aperture_masses(data_manager, config)
+    data_manager.logger.info(f'Aperture properties done in {perf_counter() - phase_start:.2f} seconds.')
 
   if aperture_velocities_needed:
     for ptype in drop_after:
@@ -894,9 +1197,13 @@ def calculate_group_properties(data_manager: DataManager) -> None:
 
   # densities
   if 'local_densities' in to_process:
+    phase_start = perf_counter()
     calculate_local_densities(data_manager)
+    data_manager.logger.info(f'Local density properties done in {perf_counter() - phase_start:.2f} seconds.')
 
+  phase_start = perf_counter()
   _assign_halo_source_properties(data_manager)
+  data_manager.logger.info(f'Halo source metadata done in {perf_counter() - phase_start:.2f} seconds.')
 
   t10 = perf_counter()
   data_manager.logger.info(f'Calculating group properties done in {t10-t1:.2f} seconds. (Load reduced: {t10-t9 + t8-t7 + t6-t5 + t4-t3 + t2-t1:.2f} seconds.)')

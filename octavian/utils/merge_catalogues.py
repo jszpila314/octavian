@@ -136,6 +136,6 @@ def merge_catalogues(files: list[str], outfile: str, configfile: str) -> None:
         all_flat = np.concatenate(all_indices)
         reordered = np.concatenate([all_flat[old_offsets[i]:old_offsets[i]+old_lengths[i]] for i in order])
 
-        out_group.create_dataset(f'{ptype_list}_indices', data=reordered, compression=1)
-        out_group.create_dataset(f'{ptype_list}_offsets', data=merged_offsets, compression=1)
-        out_group.create_dataset(f'{ptype_list}_lengths', data=merged_lengths, compression=1)
+        out_group.create_dataset(f'{ptype_list}_indices', data=reordered)
+        out_group.create_dataset(f'{ptype_list}_offsets', data=merged_offsets)
+        out_group.create_dataset(f'{ptype_list}_lengths', data=merged_lengths)

@@ -424,3 +424,337 @@ def compute_virial_quantities(radius, mass, group_idx, n_groups, rhocrit, factor
                         result_m[g, f] = cumulative[i]
 
     return result_r, result_m
+
+
+@njit
+def accumulate_membership_array_common_first(
+    halo_id_array,
+    group_index_map,
+    positions,
+    velocities,
+    masses,
+    potentials,
+    counts,
+    group_mass,
+    pos_mass_sum,
+    vel_mass_sum,
+    min_potential,
+    minpot_position,
+    minpot_velocity,
+    mass_mode,
+    do_minpot,
+):
+    width = halo_id_array.shape[1]
+    for i in range(halo_id_array.shape[0]):
+        m = masses[i]
+        for col in range(width):
+            halo_id = halo_id_array[i, col]
+            if halo_id < 0 or halo_id >= len(group_index_map):
+                continue
+            g = group_index_map[halo_id]
+            if g < 0:
+                continue
+
+            counts[g] += 1
+            if mass_mode == 1:
+                if m > group_mass[g]:
+                    group_mass[g] = m
+            else:
+                group_mass[g] += m
+
+            for d in range(3):
+                pos_mass_sum[g, d] += positions[i, d] * m
+                vel_mass_sum[g, d] += velocities[i, d] * m
+
+            if do_minpot and potentials[i] < min_potential[g]:
+                min_potential[g] = potentials[i]
+                for d in range(3):
+                    minpot_position[g, d] = positions[i, d]
+                    minpot_velocity[g, d] = velocities[i, d]
+
+
+@njit
+def accumulate_membership_array_common_second(
+    halo_id_array,
+    group_index_map,
+    positions,
+    velocities,
+    masses,
+    ref_positions,
+    ref_velocities,
+    com_velocities,
+    disp_sums,
+    angular_momentum,
+):
+    width = halo_id_array.shape[1]
+    for i in range(halo_id_array.shape[0]):
+        m = masses[i]
+        for col in range(width):
+            halo_id = halo_id_array[i, col]
+            if halo_id < 0 or halo_id >= len(group_index_map):
+                continue
+            g = group_index_map[halo_id]
+            if g < 0:
+                continue
+
+            rx = positions[i, 0] - ref_positions[g, 0]
+            ry = positions[i, 1] - ref_positions[g, 1]
+            rz = positions[i, 2] - ref_positions[g, 2]
+            vx_ref = velocities[i, 0] - ref_velocities[g, 0]
+            vy_ref = velocities[i, 1] - ref_velocities[g, 1]
+            vz_ref = velocities[i, 2] - ref_velocities[g, 2]
+            vx_com = velocities[i, 0] - com_velocities[g, 0]
+            vy_com = velocities[i, 1] - com_velocities[g, 1]
+            vz_com = velocities[i, 2] - com_velocities[g, 2]
+
+            disp_sums[g] += vx_com * vx_com + vy_com * vy_com + vz_com * vz_com
+
+            px = m * vx_ref
+            py = m * vy_ref
+            pz = m * vz_ref
+            angular_momentum[g, 0] += ry * pz - rz * py
+            angular_momentum[g, 1] += rz * px - rx * pz
+            angular_momentum[g, 2] += rx * py - ry * px
+
+
+@njit
+def accumulate_membership_array_rotation(
+    halo_id_array,
+    group_index_map,
+    positions,
+    velocities,
+    masses,
+    ref_positions,
+    ref_velocities,
+    angular_momentum,
+    counter_rotating_mass,
+    krot_sum,
+    ktot_sum,
+):
+    width = halo_id_array.shape[1]
+    for i in range(halo_id_array.shape[0]):
+        m = masses[i]
+        for col in range(width):
+            halo_id = halo_id_array[i, col]
+            if halo_id < 0 or halo_id >= len(group_index_map):
+                continue
+            g = group_index_map[halo_id]
+            if g < 0:
+                continue
+
+            rx = positions[i, 0] - ref_positions[g, 0]
+            ry = positions[i, 1] - ref_positions[g, 1]
+            rz = positions[i, 2] - ref_positions[g, 2]
+            vx = velocities[i, 0] - ref_velocities[g, 0]
+            vy = velocities[i, 1] - ref_velocities[g, 1]
+            vz = velocities[i, 2] - ref_velocities[g, 2]
+
+            px = m * vx
+            py = m * vy
+            pz = m * vz
+            lx = ry * pz - rz * py
+            ly = rz * px - rx * pz
+            lz = rx * py - ry * px
+
+            lgx = angular_momentum[g, 0]
+            lgy = angular_momentum[g, 1]
+            lgz = angular_momentum[g, 2]
+            ldot = lx * lgx + ly * lgy + lz * lgz
+            if ldot < 0.0:
+                counter_rotating_mass[g] += m
+
+            cx = ry * lgz - rz * lgy
+            cy = rz * lgx - rx * lgz
+            cz = rx * lgy - ry * lgx
+            rz_cyl = np.sqrt(cx * cx + cy * cy + cz * cz)
+
+            ktot = 0.5 * m * (vx * vx + vy * vy + vz * vz)
+            ktot_sum[g] += ktot
+            if rz_cyl > 0.0:
+                krot_sum[g] += 0.5 * (ldot / rz_cyl) ** 2 / m
+
+
+@njit
+def flatten_membership_array_radius_mass(
+    halo_id_array,
+    group_index_map,
+    positions,
+    masses,
+    ref_positions,
+):
+    width = halo_id_array.shape[1]
+    n = 0
+    for i in range(halo_id_array.shape[0]):
+        for col in range(width):
+            halo_id = halo_id_array[i, col]
+            if halo_id >= 0 and halo_id < len(group_index_map) and group_index_map[halo_id] >= 0:
+                n += 1
+
+    group_idx = np.empty(n, dtype=np.int64)
+    radii = np.empty(n)
+    flat_mass = np.empty(n)
+
+    out = 0
+    for i in range(halo_id_array.shape[0]):
+        for col in range(width):
+            halo_id = halo_id_array[i, col]
+            if halo_id < 0 or halo_id >= len(group_index_map):
+                continue
+            g = group_index_map[halo_id]
+            if g < 0:
+                continue
+
+            dx = positions[i, 0] - ref_positions[g, 0]
+            dy = positions[i, 1] - ref_positions[g, 1]
+            dz = positions[i, 2] - ref_positions[g, 2]
+            group_idx[out] = g
+            radii[out] = np.sqrt(dx * dx + dy * dy + dz * dz)
+            flat_mass[out] = masses[i]
+            out += 1
+
+    return group_idx, radii, flat_mass
+
+
+@njit
+def compute_membership_array_gas_scalar_sums(
+    halo_id_array,
+    group_index_map,
+    masses,
+    metallicities,
+    sfrs,
+    temperatures,
+    rhos,
+    mass_HI,
+    mass_H2,
+    dust_masses,
+    n_groups,
+    nhlim,
+):
+    group_mass = np.zeros(n_groups)
+    gas_HI = np.zeros(n_groups)
+    gas_H2 = np.zeros(n_groups)
+    dust = np.zeros(n_groups)
+    ndust = np.zeros(n_groups, dtype=np.int64)
+    sfr = np.zeros(n_groups)
+    metal_mass = np.zeros(n_groups)
+    metal_sfr = np.zeros(n_groups)
+    temp_mass = np.zeros(n_groups)
+    cgm_mass = np.zeros(n_groups)
+    cgm_temp_mass = np.zeros(n_groups)
+    cgm_temp_metal = np.zeros(n_groups)
+    cgm_metal_mass = np.zeros(n_groups)
+
+    width = halo_id_array.shape[1]
+    for i in range(halo_id_array.shape[0]):
+        m = masses[i]
+        z = metallicities[i]
+        sf = sfrs[i]
+        temp = temperatures[i]
+        rho = rhos[i]
+        for col in range(width):
+            halo_id = halo_id_array[i, col]
+            if halo_id < 0 or halo_id >= len(group_index_map):
+                continue
+            g = group_index_map[halo_id]
+            if g < 0:
+                continue
+
+            group_mass[g] += m
+            gas_HI[g] += mass_HI[i]
+            gas_H2[g] += mass_H2[i]
+            sfr[g] += sf
+            metal_mass[g] += z * m
+            metal_sfr[g] += z * sf
+            temp_mass[g] += temp * m
+
+            if rho >= nhlim:
+                dust[g] += dust_masses[i]
+                if dust_masses[i] > 0.0:
+                    ndust[g] += 1
+            else:
+                cgm_mass[g] += m
+                cgm_temp_mass[g] += temp * m
+                cgm_temp_metal[g] += temp * m * z
+                cgm_metal_mass[g] += z * m
+
+    return (
+        group_mass,
+        gas_HI,
+        gas_H2,
+        dust,
+        ndust,
+        sfr,
+        metal_mass,
+        metal_sfr,
+        temp_mass,
+        cgm_mass,
+        cgm_temp_mass,
+        cgm_temp_metal,
+        cgm_metal_mass,
+    )
+
+
+@njit
+def compute_membership_array_star_scalar_sums(
+    halo_id_array,
+    group_index_map,
+    masses,
+    metallicities,
+    ages,
+    n_groups,
+):
+    total_mass = np.zeros(n_groups)
+    metal_mass = np.zeros(n_groups)
+    age_mass = np.zeros(n_groups)
+    age_metal = np.zeros(n_groups)
+    young_mass = np.zeros(n_groups)
+
+    width = halo_id_array.shape[1]
+    for i in range(halo_id_array.shape[0]):
+        m = masses[i]
+        z = metallicities[i]
+        age = ages[i]
+        for col in range(width):
+            halo_id = halo_id_array[i, col]
+            if halo_id < 0 or halo_id >= len(group_index_map):
+                continue
+            g = group_index_map[halo_id]
+            if g < 0:
+                continue
+
+            total_mass[g] += m
+            metal_mass[g] += z * m
+            age_mass[g] += age * m
+            age_metal[g] += age * m * z
+            if age < 0.1:
+                young_mass[g] += m
+
+    return total_mass, metal_mass, age_mass, age_metal, young_mass
+
+
+@njit
+def compute_membership_array_bh_max(
+    halo_id_array,
+    group_index_map,
+    masses,
+    bhmdots,
+    n_groups,
+):
+    max_mass = np.full(n_groups, -np.inf)
+    bhmdot = np.full(n_groups, np.nan)
+
+    width = halo_id_array.shape[1]
+    for i in range(halo_id_array.shape[0]):
+        m = masses[i]
+        for col in range(width):
+            halo_id = halo_id_array[i, col]
+            if halo_id < 0 or halo_id >= len(group_index_map):
+                continue
+            g = group_index_map[halo_id]
+            if g < 0:
+                continue
+            if m > max_mass[g]:
+                max_mass[g] = m
+                bhmdot[g] = bhmdots[i]
+
+    return max_mass, bhmdot

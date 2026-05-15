@@ -3,7 +3,7 @@ import numpy as np
 from time import perf_counter
 from yaml import safe_load
 
-from octavian.halo_reader.ahf import build_ahf_snapshot_chains, _chain_exclusive_ids
+from octavian.halo_reader.ahf import build_ahf_snapshot_membership_arrays, _membership_array_exclusive_ids
 
 def find_nearest(array, value):
     idx = (np.abs(array - value)).argmin()
@@ -32,17 +32,17 @@ def get_id_filter(f: h5py.File, ptypes: list[str], nsplit: int) -> list[list[int
 
   return id_filter
 
-def filter_snapshot_with_chains(f: h5py.File, outfile: str, config: dict, nsplit: int, chains: dict[str, np.ndarray]):
+def filter_snapshot_with_membership_arrays(f: h5py.File, outfile: str, config: dict, nsplit: int, membership_arrays: dict[str, np.ndarray]):
   for i in range(nsplit):
     with h5py.File(f'{outfile}_{i}.hdf5', 'a') as f_out:
       f.copy(f['Header'], f_out, 'Header')
 
-  ptypes = list(chains)
+  ptypes = list(membership_arrays)
   star_weights, gas_weights, dm_weights = {}, {}, {}
   for ptype_name, weight_dict in [('PartType4', star_weights), ('PartType0', gas_weights), ('PartType1', dm_weights)]:
-    if ptype_name not in chains:
+    if ptype_name not in membership_arrays:
       continue
-    top_ids = chains[ptype_name][:, 0]
+    top_ids = membership_arrays[ptype_name][:, 0]
     unique, counts = np.unique(top_ids[top_ids >= 0], return_counts=True)
     for hid, count in zip(unique, counts):
       weight_dict[hid] = count
@@ -69,16 +69,16 @@ def filter_snapshot_with_chains(f: h5py.File, outfile: str, config: dict, nsplit
       rank_lookup[np.fromiter(halo_ids, dtype=np.int64)] = rank
 
   for ptype in ptypes:
-    chain = chains[ptype]
-    ids = chain[:, 0]
-    halo_ids = _chain_exclusive_ids(chain)
+    halo_id_array = membership_arrays[ptype]
+    ids = halo_id_array[:, 0]
+    halo_ids = _membership_array_exclusive_ids(halo_id_array)
     particle_index = np.arange(len(ids), dtype='int')
     assigned = np.zeros(len(ids), dtype=bool)
     in_lookup = (ids >= 0) & (ids < len(rank_lookup))
     assigned[in_lookup] = rank_lookup[ids[in_lookup]] >= 0
     rank_ids = rank_lookup[ids[assigned]]
-    datasets = [dataset for dataset in f[ptype].keys() if dataset not in ('HaloID', 'HaloID_chain', 'particle_index')]
-    datasets += ['HaloID', 'HaloID_chain', 'particle_index']
+    datasets = [dataset for dataset in f[ptype].keys() if dataset not in ('HaloID', 'HaloID_array', 'particle_index')]
+    datasets += ['HaloID', 'HaloID_array', 'particle_index']
     rank_masks = [rank_ids == i for i in range(nsplit)]
 
     out_files = [h5py.File(f'{outfile}_{i}.hdf5', 'a') for i in range(nsplit)]
@@ -87,8 +87,8 @@ def filter_snapshot_with_chains(f: h5py.File, outfile: str, config: dict, nsplit
         print(ptype, dataset, flush=True)
         if dataset == 'HaloID':
           data = halo_ids[assigned]
-        elif dataset == 'HaloID_chain':
-          data = chain[assigned]
+        elif dataset == 'HaloID_array':
+          data = halo_id_array[assigned]
         elif dataset == 'particle_index':
           data = particle_index[assigned]
         else:
@@ -119,16 +119,16 @@ def filter_snapshot(snapfile: str, outfile: str, configfile: str, nsplit: int=4)
   with h5py.File(snapfile, 'r') as f:
     if config.get('halo_mode') == 'subhalo':
       if config.get('halo_source') != 'ahf':
-        raise NotImplementedError('Subhalo HaloID chains are currently implemented for AHF only')
+        raise NotImplementedError('Subhalo HaloID arrays are currently implemented for AHF only')
       t = perf_counter()
-      print('Building AHF subhalo HaloID chains...', flush=True)
-      _, chains, counts = build_ahf_snapshot_chains(
+      print('Building AHF subhalo HaloID arrays...', flush=True)
+      _, membership_arrays, counts = build_ahf_snapshot_membership_arrays(
         f, config, config['ahf_particles_path'], config.get('ahf_halos_path') or None
       )
-      print(f'  Built AHF chains: {perf_counter() - t:.1f}s', flush=True)
+      print(f'  Built AHF membership arrays: {perf_counter() - t:.1f}s', flush=True)
       print(f'  AHF memberships written: {int(counts[:4].sum())}, conflicts resolved: {int(counts[7])}', flush=True)
       t = perf_counter()
-      filter_snapshot_with_chains(f, outfile, config, nsplit, chains)
+      filter_snapshot_with_membership_arrays(f, outfile, config, nsplit, membership_arrays)
       print(f'  Wrote split snapshots: {perf_counter() - t:.1f}s', flush=True)
       return
 

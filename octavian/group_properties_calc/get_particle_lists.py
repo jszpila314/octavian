@@ -17,7 +17,7 @@ def get_group_particle_indexes(data_manager: DataManager, group_name: str) -> No
     data = data_manager.data[ptype][['HaloID', 'GalID', 'particle_index']]
     ptype_list = config['ptype_lists'][ptype]
 
-    if group_name == 'halos' and ptype in data_manager.halo_id_chains:
+    if group_name == 'halos' and ptype in data_manager.halo_id_arrays:
         group_ids, rows = data_manager.get_halo_membership_rows(ptype)
         data = pd.DataFrame({
             groupID: group_ids,
