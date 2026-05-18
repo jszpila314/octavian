@@ -20,6 +20,7 @@ from octavian.group_properties_calc.group_computations import (
     compute_angular_momentum,
     compute_aperture_component_properties,
     compute_central_galaxy_flags,
+    compute_galaxy_hydrogen_assignment,
     compute_gas_scalar_sums,
     compute_membership_array_bh_max,
     compute_membership_array_gas_scalar_sums,
@@ -722,6 +723,8 @@ def gas_group_properties(data_manager: DataManager, group_name: str) -> None:
       _group_mass_sum,
       gas_HI,
       gas_H2,
+      gas_HI_ism,
+      gas_H2_ism,
       dust_mass,
       ndust,
       sfr_sum,
@@ -742,6 +745,8 @@ def gas_group_properties(data_manager: DataManager, group_name: str) -> None:
         df['rho'].to_numpy(),
         df['mass_HI'].to_numpy(),
         df['mass_H2'].to_numpy(),
+        df['mass_HI_ism'].to_numpy(),
+        df['mass_H2_ism'].to_numpy(),
         dust_masses,
         n_groups,
         config['nHlim'],
@@ -751,21 +756,21 @@ def gas_group_properties(data_manager: DataManager, group_name: str) -> None:
     group_data['mass_H2'] = gas_H2
     group_data['mass_dust'] = dust_mass
     group_data['ndust'] = ndust
-    group_data['mass_HI_ism'] = gas_HI
-    group_data['mass_H2_ism'] = gas_H2
+    group_data['mass_HI_ism'] = gas_HI_ism
+    group_data['mass_H2_ism'] = gas_H2_ism
     group_data['sfr'] = sfr_sum
 
     group_mass = group_data[f'mass_gas'].to_numpy()
     group_sfr = group_data['sfr'].to_numpy()
-    group_data['metallicity_mass_weighted'] = _safe_divide(metal_mass, group_mass)
-    group_data['metallicity_sfr_weighted'] = _safe_divide(metal_sfr, group_sfr)
+    group_data['metallicity_mass_weighted'] = _safe_divide(metal_mass, group_mass, fill=0.0)
+    group_data['metallicity_sfr_weighted'] = _safe_divide(metal_sfr, group_sfr, fill=0.0)
     group_data['mass_cgm'] = cgm_mass_sum
     cgm_mass = group_data['mass_cgm'].to_numpy()
-    group_data['temp_mass_weighted'] = _safe_divide(temp_mass, group_mass)
-    group_data['temp_mass_weighted_cgm'] = _safe_divide(cgm_temp_mass, cgm_mass)
-    group_data['temp_metal_weighted_cgm'] = _safe_divide(cgm_temp_metal, cgm_temp_mass)
-    group_data['metallicity_mass_weighted_cgm'] = _safe_divide(cgm_metal_mass, cgm_mass)
-    group_data['metallicity_temp_weighted_cgm'] = _safe_divide(cgm_temp_metal, cgm_metal_mass)
+    group_data['temp_mass_weighted'] = _safe_divide(temp_mass, group_mass, fill=0.0)
+    group_data['temp_mass_weighted_cgm'] = _safe_divide(cgm_temp_mass, cgm_mass, fill=0.0)
+    group_data['temp_metal_weighted_cgm'] = _safe_divide(cgm_temp_metal, cgm_metal_mass, fill=0.0)
+    group_data['metallicity_mass_weighted_cgm'] = _safe_divide(cgm_metal_mass, cgm_mass, fill=0.0)
+    group_data['metallicity_temp_weighted_cgm'] = _safe_divide(cgm_temp_metal, cgm_temp_mass, fill=0.0)
     return
 
   group_ids, rows = _group_ids_and_rows(data_manager, group_name, 'gas', df, groupID_key)
@@ -776,6 +781,8 @@ def gas_group_properties(data_manager: DataManager, group_name: str) -> None:
   rhos = df['rho'].to_numpy()[rows]
   mass_HI = df['mass_HI'].to_numpy()[rows]
   mass_H2 = df['mass_H2'].to_numpy()[rows]
+  mass_HI_ism = df['mass_HI_ism'].to_numpy()[rows]
+  mass_H2_ism = df['mass_H2_ism'].to_numpy()[rows]
   dust_masses = df['dustmass'].to_numpy()[rows] if 'dustmass' in df else np.zeros(len(group_ids))
 
   if group_name == 'galaxies':
@@ -788,6 +795,8 @@ def gas_group_properties(data_manager: DataManager, group_name: str) -> None:
     rhos = rhos[keep]
     mass_HI = mass_HI[keep]
     mass_H2 = mass_H2[keep]
+    mass_HI_ism = mass_HI_ism[keep]
+    mass_H2_ism = mass_H2_ism[keep]
     dust_masses = dust_masses[keep]
 
   # guard against empty group
@@ -801,6 +810,8 @@ def gas_group_properties(data_manager: DataManager, group_name: str) -> None:
     _group_mass_sum,
     gas_HI,
     gas_H2,
+    gas_HI_ism,
+    gas_H2_ism,
     dust_mass,
     ndust,
     sfr_sum,
@@ -822,6 +833,8 @@ def gas_group_properties(data_manager: DataManager, group_name: str) -> None:
       rhos[order],
       mass_HI[order],
       mass_H2[order],
+      mass_HI_ism[order],
+      mass_H2_ism[order],
       dust_masses[order],
       n_groups,
       config['nHlim'],
@@ -833,9 +846,8 @@ def gas_group_properties(data_manager: DataManager, group_name: str) -> None:
   group_data['mass_dust'] = dust_mass
   group_data['ndust'] = ndust
 
-  # CAESAR stores HI_ism/H2_ism from the same gas hydrogen sums in group_funcs.pyx.
-  group_data['mass_HI_ism'] = gas_HI
-  group_data['mass_H2_ism'] = gas_H2
+  group_data['mass_HI_ism'] = gas_HI_ism
+  group_data['mass_H2_ism'] = gas_H2_ism
 
   # SFR
   group_data['sfr'] = sfr_sum
@@ -844,22 +856,22 @@ def gas_group_properties(data_manager: DataManager, group_name: str) -> None:
   group_mass = group_data[f'mass_gas'].to_numpy()
   group_sfr = group_data['sfr'].to_numpy()
 
-  group_data['metallicity_mass_weighted'] = _safe_divide(metal_mass, group_mass)
-  group_data['metallicity_sfr_weighted'] = _safe_divide(metal_sfr, group_sfr)
+  group_data['metallicity_mass_weighted'] = _safe_divide(metal_mass, group_mass, fill=0.0)
+  group_data['metallicity_sfr_weighted'] = _safe_divide(metal_sfr, group_sfr, fill=0.0)
 
   # CGM quantities
   group_data['mass_cgm'] = cgm_mass_sum
   cgm_mass = group_data['mass_cgm'].to_numpy()
 
   # temperatures
-  group_data['temp_mass_weighted'] = _safe_divide(temp_mass, group_mass)
+  group_data['temp_mass_weighted'] = _safe_divide(temp_mass, group_mass, fill=0.0)
 
-  group_data['temp_mass_weighted_cgm'] = _safe_divide(cgm_temp_mass, cgm_mass)
-  group_data['temp_metal_weighted_cgm'] = _safe_divide(cgm_temp_metal, cgm_temp_mass)
+  group_data['temp_mass_weighted_cgm'] = _safe_divide(cgm_temp_mass, cgm_mass, fill=0.0)
+  group_data['temp_metal_weighted_cgm'] = _safe_divide(cgm_temp_metal, cgm_metal_mass, fill=0.0)
 
   # CGM metallicity
-  group_data['metallicity_mass_weighted_cgm'] = _safe_divide(cgm_metal_mass, cgm_mass)
-  group_data['metallicity_temp_weighted_cgm'] = _safe_divide(cgm_temp_metal, cgm_metal_mass)
+  group_data['metallicity_mass_weighted_cgm'] = _safe_divide(cgm_metal_mass, cgm_mass, fill=0.0)
+  group_data['metallicity_temp_weighted_cgm'] = _safe_divide(cgm_temp_metal, cgm_temp_mass, fill=0.0)
 
 def star_group_properties(data_manager: DataManager, group_name: str) -> None:
   config = data_manager.config
@@ -878,10 +890,10 @@ def star_group_properties(data_manager: DataManager, group_name: str) -> None:
         df['age'].to_numpy(),
         n_groups,
     )
-    group_data['metallicity_stellar'] = _safe_divide(metal_mass, total_mass)
+    group_data['metallicity_stellar'] = _safe_divide(metal_mass, total_mass, fill=0.0)
     group_mass_star = group_data['mass_star'].to_numpy()
-    group_data['age_mass_weighted'] = _safe_divide(age_mass, group_mass_star)
-    group_data['age_metal_weighted'] = _safe_divide(age_metal, metal_mass)
+    group_data['age_mass_weighted'] = _safe_divide(age_mass, group_mass_star, fill=0.0)
+    group_data['age_metal_weighted'] = _safe_divide(age_metal, metal_mass, fill=0.0)
     group_data['sfr_100'] = young_mass / 100.e6
     return
 
@@ -914,12 +926,12 @@ def star_group_properties(data_manager: DataManager, group_name: str) -> None:
   )
 
   # metallicity
-  group_data['metallicity_stellar'] = _safe_divide(metal_mass, total_mass)
+  group_data['metallicity_stellar'] = _safe_divide(metal_mass, total_mass, fill=0.0)
 
   # age
   group_mass_star = group_data['mass_star'].to_numpy()
-  group_data['age_mass_weighted'] = _safe_divide(age_mass, group_mass_star)
-  group_data['age_metal_weighted'] = _safe_divide(age_metal, metal_mass)
+  group_data['age_mass_weighted'] = _safe_divide(age_mass, group_mass_star, fill=0.0)
+  group_data['age_metal_weighted'] = _safe_divide(age_metal, metal_mass, fill=0.0)
   group_data['sfr_100'] = young_mass / 100.e6
 
 def bh_group_properties(data_manager: DataManager, group_name: str) -> None:
@@ -939,12 +951,16 @@ def bh_group_properties(data_manager: DataManager, group_name: str) -> None:
         df['bhmdot'].to_numpy(),
         n_groups,
     )
-    max_mass[~np.isfinite(max_mass)] = np.nan
-    group_data['bhmdot'] = bhmdot
+    valid = np.isfinite(max_mass) & (max_mass > 0.0) & np.isfinite(bhmdot)
+    bhmdot_out = np.zeros(n_groups)
+    bhmass_out = np.zeros(n_groups)
+    bhmdot_out[valid] = bhmdot[valid]
+    bhmass_out[valid] = max_mass[valid]
+    group_data['bhmdot'] = bhmdot_out
 
     FRAD = 0.1
     edd_factor = (4 * np.pi * const.G * const.m_p / (FRAD * const.c * const.sigma_T)).to('1/yr').value
-    group_data['bh_fedd'] = _safe_divide(bhmdot, edd_factor * max_mass)
+    group_data['bh_fedd'] = _safe_divide(bhmdot_out, edd_factor * bhmass_out, fill=0.0)
     return
 
   group_ids, rows = _group_ids_and_rows(data_manager, group_name, 'bh', df, groupID_key)
@@ -958,6 +974,8 @@ def bh_group_properties(data_manager: DataManager, group_name: str) -> None:
       bhmdots = bhmdots[keep]
 
   if len(masses) == 0:
+      group_data['bhmdot'] = np.zeros(len(group_data))
+      group_data['bh_fedd'] = np.zeros(len(group_data))
       return
 
   n_groups = len(group_data)
@@ -968,7 +986,7 @@ def bh_group_properties(data_manager: DataManager, group_name: str) -> None:
   valid = max_idx >= 0
 
   # bhmdot of most massive BH
-  bhmdot = np.full(n_groups, np.nan)
+  bhmdot = np.zeros(n_groups)
   bhmdot[valid] = bhmdots[max_idx[valid]]
   group_data['bhmdot'] = bhmdot
 
@@ -976,9 +994,9 @@ def bh_group_properties(data_manager: DataManager, group_name: str) -> None:
   FRAD = 0.1
   edd_factor = (4 * np.pi * const.G * const.m_p / (FRAD * const.c * const.sigma_T)).to('1/yr').value
 
-  bh_mass = np.full(n_groups, np.nan)
+  bh_mass = np.zeros(n_groups)
   bh_mass[valid] = masses[max_idx[valid]]
-  group_data['bh_fedd'] = _safe_divide(bhmdot, edd_factor * bh_mass)
+  group_data['bh_fedd'] = _safe_divide(bhmdot, edd_factor * bh_mass, fill=0.0)
 
 def calculate_local_densities(data_manager: DataManager) -> None:
 
@@ -1025,6 +1043,56 @@ def _flatten_neighbor_lists(neighbor_lists):
 
     return offsets, indices
 
+
+
+def assign_galaxy_hydrogen_masses(data_manager: DataManager) -> None:
+  if 'galaxies' not in data_manager.group_data or 'gas' not in data_manager.data:
+    return
+
+  group_data = data_manager.group_data['galaxies']
+  gas = data_manager.data['gas']
+  if len(group_data) == 0 or len(gas) == 0:
+    return
+
+  if 'gas' in data_manager.halo_id_arrays:
+    gas_halos = data_manager.get_halo_ids('gas', mode='top')
+  else:
+    gas_halos = gas['HaloID'].to_numpy()
+
+  if '_central_host_halo_index' in group_data:
+    galaxy_halos = group_data['_central_host_halo_index'].to_numpy()
+  else:
+    galaxy_halos = group_data['parent_halo_index'].to_numpy()
+
+  valid_gas = gas_halos >= 0
+  valid_galaxies = galaxy_halos >= 0
+  if not np.any(valid_gas) or not np.any(valid_galaxies):
+    group_data['mass_HI'] = np.zeros(len(group_data))
+    group_data['mass_H2'] = np.zeros(len(group_data))
+    return
+
+  gas_order, gas_unique_halos, gas_start, gas_end = sort_by_group(gas_halos[valid_gas])
+  galaxy_order, galaxy_unique_halos, galaxy_start, galaxy_end = sort_by_group(galaxy_halos[valid_galaxies])
+  galaxy_rows = np.flatnonzero(valid_galaxies)[galaxy_order].astype(np.int64)
+
+  galaxy_HI, galaxy_H2 = compute_galaxy_hydrogen_assignment(
+      gas_unique_halos.astype(np.int64),
+      gas_start.astype(np.int64),
+      gas_end.astype(np.int64),
+      galaxy_unique_halos.astype(np.int64),
+      galaxy_start.astype(np.int64),
+      galaxy_end.astype(np.int64),
+      gas[['x', 'y', 'z']].to_numpy()[valid_gas][gas_order],
+      gas['mass_HI'].to_numpy()[valid_gas][gas_order],
+      gas['mass_H2'].to_numpy()[valid_gas][gas_order],
+      group_data[['x_total', 'y_total', 'z_total']].to_numpy()[valid_galaxies][galaxy_order],
+      group_data['mass_total'].to_numpy()[valid_galaxies][galaxy_order],
+      galaxy_rows,
+      len(group_data),
+      data_manager.simulation['boxsize'],
+  )
+  group_data['mass_HI'] = galaxy_HI
+  group_data['mass_H2'] = galaxy_H2
 
 def calculate_aperture_masses(data_manager, config):
     
@@ -1168,9 +1236,10 @@ def calculate_group_properties(data_manager: DataManager) -> None:
     data = data_manager.data['gas']
     mass = data['mass'].to_numpy()
     rho = data['rho'].to_numpy()
-    fHI = data['nh'].to_numpy().copy()
-    fH2 = data['fH2'].to_numpy().copy()
-    fHI[rho < config['low_nHlim']] = 0.
+    fHI_ism = data['nh'].to_numpy().copy()
+    fH2_ism = data['fH2'].to_numpy().copy()
+    fHI = fHI_ism.copy()
+    fH2 = fH2_ism.copy()
     fH2[rho < config['nHlim']] = 0.
     not_conserving_mass = (fHI + fH2) > 1.
     fHI[not_conserving_mass] = 1. - fH2[not_conserving_mass]
@@ -1178,9 +1247,13 @@ def calculate_group_properties(data_manager: DataManager) -> None:
     data['fHI'] = fHI
     data['mass_HI'] = config['XH'] * fHI * mass
     data['mass_H2'] = config['XH'] * fH2 * mass
+    data['mass_HI_ism'] = config['XH'] * fHI_ism * mass
+    data['mass_H2_ism'] = config['XH'] * fH2_ism * mass
 
     for group in groups:
       gas_group_properties(data_manager, group)
+    if 'galaxies' in groups:
+      assign_galaxy_hydrogen_masses(data_manager)
     data_manager.logger.info(f'Gas group properties done in {perf_counter() - phase_start:.2f} seconds.')
 
   # star properties

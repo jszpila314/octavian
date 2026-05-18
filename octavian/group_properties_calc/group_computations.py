@@ -191,6 +191,8 @@ def compute_gas_scalar_sums(
     rhos,
     mass_HI,
     mass_H2,
+    mass_HI_ism,
+    mass_H2_ism,
     dust_masses,
     n_groups,
     nhlim,
@@ -198,6 +200,8 @@ def compute_gas_scalar_sums(
     group_mass = np.zeros(n_groups)
     gas_HI = np.zeros(n_groups)
     gas_H2 = np.zeros(n_groups)
+    gas_HI_ism = np.zeros(n_groups)
+    gas_H2_ism = np.zeros(n_groups)
     dust = np.zeros(n_groups)
     ndust = np.zeros(n_groups, dtype=np.int64)
     sfr = np.zeros(n_groups)
@@ -223,6 +227,8 @@ def compute_gas_scalar_sums(
             group_mass[group] += m
             gas_HI[group] += mass_HI[i]
             gas_H2[group] += mass_H2[i]
+            gas_HI_ism[group] += mass_HI_ism[i]
+            gas_H2_ism[group] += mass_H2_ism[i]
             sfr[group] += sf
             metal_mass[group] += z * m
             metal_sfr[group] += z * sf
@@ -242,6 +248,8 @@ def compute_gas_scalar_sums(
         group_mass,
         gas_HI,
         gas_H2,
+        gas_HI_ism,
+        gas_H2_ism,
         dust,
         ndust,
         sfr,
@@ -377,6 +385,74 @@ def compute_aperture_component_properties(
                 sigma[g, out] = np.sqrt(sig2 / 3.0)
 
     return output_mass, sigma
+
+
+@njit
+def compute_galaxy_hydrogen_assignment(
+    gas_unique_halos,
+    gas_start,
+    gas_end,
+    gal_unique_halos,
+    gal_start,
+    gal_end,
+    gas_pos,
+    mass_HI,
+    mass_H2,
+    galaxy_pos,
+    galaxy_mass,
+    galaxy_indices,
+    n_galaxies,
+    boxsize,
+):
+    galaxy_HI = np.zeros(n_galaxies)
+    galaxy_H2 = np.zeros(n_galaxies)
+    halfbox = 0.5 * boxsize
+    gh = 0
+
+    for h in range(len(gas_unique_halos)):
+        halo_id = gas_unique_halos[h]
+        while gh < len(gal_unique_halos) and gal_unique_halos[gh] < halo_id:
+            gh += 1
+        if gh >= len(gal_unique_halos):
+            break
+        if gal_unique_halos[gh] != halo_id:
+            continue
+
+        gs = gas_start[h]
+        ge = gas_end[h]
+        js = gal_start[gh]
+        je = gal_end[gh]
+        for i in range(gs, ge):
+            hi = mass_HI[i]
+            h2 = mass_H2[i]
+            if hi == 0.0 and h2 == 0.0:
+                continue
+
+            best = galaxy_indices[js]
+            best_mwd = -1.0
+            for j in range(js, je):
+                dx = abs(gas_pos[i, 0] - galaxy_pos[j, 0])
+                dy = abs(gas_pos[i, 1] - galaxy_pos[j, 1])
+                dz = abs(gas_pos[i, 2] - galaxy_pos[j, 2])
+                if dx > halfbox:
+                    dx = boxsize - dx
+                if dy > halfbox:
+                    dy = boxsize - dy
+                if dz > halfbox:
+                    dz = boxsize - dz
+                d2 = dx * dx + dy * dy + dz * dz
+                if d2 == 0.0:
+                    best = galaxy_indices[j]
+                    break
+                mwd = galaxy_mass[j] / d2
+                if mwd > best_mwd:
+                    best_mwd = mwd
+                    best = galaxy_indices[j]
+
+            galaxy_HI[best] += hi
+            galaxy_H2[best] += h2
+
+    return galaxy_HI, galaxy_H2
 
 
 @njit
@@ -626,6 +702,8 @@ def compute_membership_array_gas_scalar_sums(
     rhos,
     mass_HI,
     mass_H2,
+    mass_HI_ism,
+    mass_H2_ism,
     dust_masses,
     n_groups,
     nhlim,
@@ -633,6 +711,8 @@ def compute_membership_array_gas_scalar_sums(
     group_mass = np.zeros(n_groups)
     gas_HI = np.zeros(n_groups)
     gas_H2 = np.zeros(n_groups)
+    gas_HI_ism = np.zeros(n_groups)
+    gas_H2_ism = np.zeros(n_groups)
     dust = np.zeros(n_groups)
     ndust = np.zeros(n_groups, dtype=np.int64)
     sfr = np.zeros(n_groups)
@@ -662,6 +742,8 @@ def compute_membership_array_gas_scalar_sums(
             group_mass[g] += m
             gas_HI[g] += mass_HI[i]
             gas_H2[g] += mass_H2[i]
+            gas_HI_ism[g] += mass_HI_ism[i]
+            gas_H2_ism[g] += mass_H2_ism[i]
             sfr[g] += sf
             metal_mass[g] += z * m
             metal_sfr[g] += z * sf
@@ -681,6 +763,8 @@ def compute_membership_array_gas_scalar_sums(
         group_mass,
         gas_HI,
         gas_H2,
+        gas_HI_ism,
+        gas_H2_ism,
         dust,
         ndust,
         sfr,
