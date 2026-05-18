@@ -33,6 +33,12 @@ def merge_catalogues(files: list[str], outfile: str, configfile: str) -> None:
           galaxy_masses.append(file_galaxy_masses)
       except: pass
   print(file_lengths)
+  galaxy_offsets = {}
+  galaxy_offset = 0
+  for file in files:
+    galaxy_offsets[file] = galaxy_offset
+    galaxy_offset += file_lengths['galaxies'][file]
+
   halo_masses = np.concatenate(halo_masses)
   halo_source_ids = np.concatenate(halo_source_ids)
   galaxy_masses = np.concatenate(galaxy_masses)
@@ -42,6 +48,8 @@ def merge_catalogues(files: list[str], outfile: str, configfile: str) -> None:
   galaxy_order = np.argsort(galaxy_masses)
   halo_inverse_order = np.empty(len(halo_order), dtype=np.int64)
   halo_inverse_order[halo_order] = np.arange(len(halo_order), dtype=np.int64)
+  galaxy_inverse_order = np.empty(len(galaxy_order), dtype=np.int64)
+  galaxy_inverse_order[galaxy_order] = np.arange(len(galaxy_order), dtype=np.int64)
   halo_source_order = np.argsort(halo_source_ids)
   sorted_halo_source_ids = halo_source_ids[halo_source_order]
   if np.any(sorted_halo_source_ids[1:] == sorted_halo_source_ids[:-1]):
@@ -71,7 +79,14 @@ def merge_catalogues(files: list[str], outfile: str, configfile: str) -> None:
         with h5py.File(file, 'r') as f:
 
           try:
-            halo_data.append(f['halo_data'][dataset][:])
+            values = f['halo_data'][dataset][:]
+            if dataset == 'central_galaxy':
+              valid = values >= 0
+              remapped = np.full(values.shape, -1, dtype=np.int64)
+              if np.any(valid):
+                remapped[valid] = galaxy_inverse_order[galaxy_offsets[file] + values[valid].astype(np.int64)]
+              values = remapped
+            halo_data.append(values)
             halo_seen = True
           except:
             if '_L' in dataset: halo_data.append(np.full((file_lengths['halos'][file], 3), np.nan))

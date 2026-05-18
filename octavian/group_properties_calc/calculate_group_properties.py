@@ -252,7 +252,8 @@ def _assign_central_galaxies(data_manager: DataManager) -> None:
     galaxy_data['central'] = False
     return
 
-  parent_halo = galaxy_data['parent_halo_index'].to_numpy(dtype=np.int64)
+  parent_key = '_central_host_halo_index' if '_central_host_halo_index' in galaxy_data else 'parent_halo_index'
+  parent_halo = galaxy_data[parent_key].to_numpy(dtype=np.int64)
   stellar_mass = galaxy_data['mass_star'].to_numpy(dtype=float)
   galaxy_ids = galaxy_data.index.to_numpy(dtype=np.int64)
   n_halos = len(halo_data)
@@ -461,8 +462,14 @@ def common_group_properties(data_manager: DataManager, group_name: str, particle
     _common_halo_array_properties(data_manager, particle_type, ptypes)
     return
 
+  use_central_host_ids = group_name == 'galaxies' and particle_type == 'total' and bool(data_manager.halo_id_arrays)
+  if use_central_host_ids:
+    missing = [ptype for ptype in ptypes if ptype not in data_manager.halo_id_arrays]
+    if missing:
+      raise KeyError(f'HaloID_array missing for galaxy central-host ptypes: {missing}')
+
   # ids: groups, halos, galaxies
-  group_ids_list, halo_ids_list, gal_ids_list = [], [], []
+  group_ids_list, halo_ids_list, central_host_ids_list, gal_ids_list = [], [], [], []
   # physical quantities: mass, potential
   masses_list, potentials_list = [], []
   # kinematics: positions, velocities
@@ -474,6 +481,8 @@ def common_group_properties(data_manager: DataManager, group_name: str, particle
     group_ids, rows = _group_ids_and_rows(data_manager, group_name, ptype, df, groupID_key)
     group_ids_list.append(group_ids)
     halo_ids_list.append(df['HaloID'].to_numpy()[rows])
+    if use_central_host_ids:
+      central_host_ids_list.append(data_manager.get_halo_ids(ptype, mode='top')[rows])
     gal_ids_list.append(df['GalID'].to_numpy()[rows])
     masses_list.append(df['mass'].to_numpy()[rows])
     potentials_list.append(df['potential'].to_numpy()[rows])
@@ -491,6 +500,7 @@ def common_group_properties(data_manager: DataManager, group_name: str, particle
 
   group_ids = np.concatenate(group_ids_list)
   halo_ids = np.concatenate(halo_ids_list)
+  central_host_ids = np.concatenate(central_host_ids_list) if central_host_ids_list else None
   gal_ids = np.concatenate(gal_ids_list)
   masses = np.concatenate(masses_list)
   potentials = np.concatenate(potentials_list)
@@ -503,6 +513,8 @@ def common_group_properties(data_manager: DataManager, group_name: str, particle
     keep = gal_ids != -1
     group_ids = group_ids[keep]
     halo_ids = halo_ids[keep]
+    if central_host_ids is not None:
+      central_host_ids = central_host_ids[keep]
     masses = masses[keep]
     potentials = potentials[keep]
     positions = positions[keep]
@@ -521,11 +533,16 @@ def common_group_properties(data_manager: DataManager, group_name: str, particle
   # parent halo assignment
   if group_name == 'galaxies' and particle_type == 'total':
       parent = np.full(n_groups, -1, dtype=np.int64)
+      central_host = np.full(n_groups, -1, dtype=np.int64) if central_host_ids is not None else None
       for i in range(len(group_ids)):
           g = group_idx[i]
           if parent[g] == -1:
               parent[g] = halo_ids[i]
+          if central_host is not None and central_host[g] == -1:
+              central_host[g] = central_host_ids[i]
       group_data['parent_halo_index'] = parent
+      if central_host is not None:
+          group_data['_central_host_halo_index'] = central_host
 
   # -
   # step 3: nparticles
