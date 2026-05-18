@@ -6,6 +6,7 @@
 // libraries
 #include <stdio.h>   // file operations: fopen, fgets, fclose
 #include <stdlib.h>  // general utilities
+#include <stdint.h>  // fixed-width integer types
 
 // NOTE: this is a C implementation of the state machine
 
@@ -53,4 +54,170 @@ long parse_ahf_particles(
     }
     fclose(f); // must explicitly close the file 
     return idx; // number of particles we wrote into the array
+}
+
+#define MISSING_ROW UINT32_MAX
+
+static long find_halo_id(int64_t hid, const int64_t *raw_halo_ids, long n_halos)
+{
+    long lo = 0;
+    long hi = n_halos;
+    while (lo < hi) {
+        long mid = lo + (hi - lo) / 2;
+        int64_t val = raw_halo_ids[mid];
+        if (val < hid) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo < n_halos && raw_halo_ids[lo] == hid) return lo;
+    return -1;
+}
+
+static int slot_from_raw_ptype(int64_t raw_ptype)
+{
+    if (raw_ptype == 0) return 0;  // gas
+    if (raw_ptype == 1) return 1;  // dm
+    if (raw_ptype == 4) return 2;  // star
+    if (raw_ptype == 5) return 3;  // bh
+    return -1;
+}
+
+static int membership_depth(const int32_t *values, int width)
+{
+    int depth = -1;
+    for (int col = 0; col < width; col++) {
+        if (values[col] >= 0) depth = col;
+    }
+    return depth;
+}
+
+static void clear_after(int32_t *values, int width, int depth)
+{
+    for (int col = depth + 1; col < width; col++) {
+        values[col] = -1;
+    }
+}
+
+static void copy_candidate(int32_t *membership_array, const int32_t *candidate, int width, int depth)
+{
+    for (int col = 0; col <= depth; col++) {
+        membership_array[col] = candidate[col];
+    }
+    clear_after(membership_array, width, depth);
+}
+
+static int is_prefix(const int32_t *prefix, int prefix_depth, const int32_t *membership_array, int array_depth)
+{
+    if (prefix_depth > array_depth) return 0;
+    for (int col = 0; col <= prefix_depth; col++) {
+        if (prefix[col] != membership_array[col]) return 0;
+    }
+    return 1;
+}
+
+static void choose_membership_value(
+    int32_t *membership_array,
+    uint32_t row,
+    int width,
+    const int32_t *candidate,
+    uint64_t *counts
+)
+{
+    int candidate_depth = membership_depth(candidate, width);
+    if (candidate_depth < 0) return;
+
+    int32_t *current = membership_array + (uint64_t)row * (uint64_t)width;
+    int current_depth = membership_depth(current, width);
+    if (current_depth < 0) {
+        copy_candidate(current, candidate, width, candidate_depth);
+        return;
+    }
+
+    if (is_prefix(current, current_depth, candidate, candidate_depth)) {
+        copy_candidate(current, candidate, width, candidate_depth);
+        return;
+    } else if (is_prefix(candidate, candidate_depth, current, current_depth)) {
+        return;
+    }
+
+    counts[7]++;
+    if (
+        candidate_depth > current_depth ||
+        (candidate_depth == current_depth && candidate[candidate_depth] < current[current_depth])
+    ) {
+        copy_candidate(current, candidate, width, candidate_depth);
+    }
+}
+
+long fill_ahf_membership_arrays(
+    const char *filename,
+    const int64_t *raw_halo_ids,
+    const int32_t *ancestor_arrays,
+    long n_halos,
+    const uint32_t *lookup_gas,
+    const uint32_t *lookup_dm,
+    const uint32_t *lookup_star,
+    const uint32_t *lookup_bh,
+    int64_t max_pid,
+    int width,
+    int32_t *array_gas,
+    int32_t *array_dm,
+    int32_t *array_star,
+    int32_t *array_bh,
+    uint64_t *counts
+)
+{
+    FILE *f = fopen(filename, "r");
+    if (f == NULL) return -1;
+
+    char line[256];
+    int64_t remaining = 0;
+    long current_halo_id = -1;
+    long long a_ll, b_ll;
+    long written = 0;
+
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "%lld %lld", &a_ll, &b_ll) != 2) continue;
+        int64_t a = (int64_t)a_ll;
+        int64_t b = (int64_t)b_ll;
+
+        if (remaining == 0) {
+            remaining = a;
+            current_halo_id = find_halo_id(b, raw_halo_ids, n_halos);
+            continue;
+        }
+
+        remaining--;
+        int slot = slot_from_raw_ptype(b);
+        if (slot < 0) {
+            counts[4]++;
+            continue;
+        }
+        if (current_halo_id < 0 || a < 0 || a > max_pid) {
+            counts[5]++;
+            continue;
+        }
+
+        uint32_t row = MISSING_ROW;
+        if (slot == 0) row = lookup_gas[a];
+        else if (slot == 1) row = lookup_dm[a];
+        else if (slot == 2) row = lookup_star[a];
+        else row = lookup_bh[a];
+
+        if (row == MISSING_ROW) {
+            counts[6]++;
+            continue;
+        }
+
+        const int32_t *candidate = ancestor_arrays + (uint64_t)current_halo_id * (uint64_t)width;
+        if (slot == 0) choose_membership_value(array_gas, row, width, candidate, counts);
+        else if (slot == 1) choose_membership_value(array_dm, row, width, candidate, counts);
+        else if (slot == 2) choose_membership_value(array_star, row, width, candidate, counts);
+        else choose_membership_value(array_bh, row, width, candidate, counts);
+
+        counts[slot]++;
+        written++;
+    }
+
+    fclose(f);
+    return written;
 }

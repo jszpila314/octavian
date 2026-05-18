@@ -17,7 +17,13 @@ def get_group_particle_indexes(data_manager: DataManager, group_name: str) -> No
     data = data_manager.data[ptype][['HaloID', 'GalID', 'particle_index']]
     ptype_list = config['ptype_lists'][ptype]
 
-    if group_name == 'galaxies':
+    if group_name == 'halos' and ptype in data_manager.halo_id_arrays:
+        group_ids, rows = data_manager.get_halo_membership_rows(ptype)
+        data = pd.DataFrame({
+            groupID: group_ids,
+            'particle_index': data['particle_index'].to_numpy()[rows],
+        })
+    elif group_name == 'galaxies':
         data = data.loc[data['GalID'] != -1]
 
     if len(data) == 0:

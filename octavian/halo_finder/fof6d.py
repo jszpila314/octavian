@@ -300,7 +300,7 @@ def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
   work_items = [work_items[i] for i in order]
   halo_ids = [halo_ids[i] for i in order]
 
-  results = Parallel(n_jobs=12, pre_dispatch='2*n_jobs', batch_size=1)(
+  results = Parallel(n_jobs=nproc, pre_dispatch='2*n_jobs', batch_size=1)(
       delayed(run_fof6d_in_halo)(
           pos, vel, ptype, idx,
           kernel_table, config['MINIMUM_STARS_PER_GALAXY'], fof_LL, vel_LL
@@ -327,12 +327,17 @@ def run_fof6d(data_manager: DataManager, nproc: int = 1) -> None:
   data_manager.logger.info(f'Running FOF6D done in {t6-t1:.2f} seconds. (Load reduced: {t6-t5 + t4-t3 + t2-t1:.2f} seconds)')
 
   all_timings = [t for _, t in results]
-  timings_df = pd.DataFrame(all_timings)
-  data_manager.logger.info(f'\n=== FOF6D Timing Summary (rank {data_manager.rank}) ===')
-  data_manager.logger.info(f'Halos processed: {len(timings_df)}')
-  data_manager.logger.info(f'Total particles: {timings_df['n_particles'].sum()}')
-  data_manager.logger.info(timings_df[['sort', 'neighbors', 'weights', 'merge']].sum().to_string())
-  data_manager.logger.info(f'\nTop 5 halos by total time:')
-  timings_df['total'] = timings_df[['sort', 'neighbors', 'weights', 'merge']].sum(axis=1)
-  data_manager.logger.info(timings_df.nlargest(5, 'total').to_string())
-  data_manager.logger.info('=' * 40)
+  if all_timings:
+    timings_df = pd.DataFrame(all_timings)
+    timing_columns = ['sort', 'neighbors', 'weights', 'merge']
+    for column in timing_columns:
+      if column not in timings_df:
+        timings_df[column] = 0.
+    data_manager.logger.info(f'\n=== FOF6D Timing Summary (rank {data_manager.rank}) ===')
+    data_manager.logger.info(f'Halos processed: {len(timings_df)}')
+    data_manager.logger.info(f"Total particles: {timings_df['n_particles'].sum()}")
+    data_manager.logger.info(timings_df[timing_columns].sum().to_string())
+    data_manager.logger.info(f'\nTop 5 halos by total time:')
+    timings_df['total'] = timings_df[timing_columns].sum(axis=1)
+    data_manager.logger.info(timings_df.nlargest(5, 'total').to_string())
+    data_manager.logger.info('=' * 40)

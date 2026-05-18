@@ -19,10 +19,11 @@ import gzip
 from pathlib import Path
 from time import perf_counter
 
+import h5py
 import numpy as np
 import pandas as pd
 
-from octavian.halo_reader.halo_utils import HaloMembership, HaloReader, HaloTree
+from octavian.halo_reader.halo_utils import HaloMembership, HaloReader, HaloTree, PTYPE_ENCODE
 
 # AHF assigns ptype codes, we change these to ptype names for Octavian compatibility
 _PTYPE_MAP = {0: 0, # gas
@@ -51,7 +52,8 @@ def read_ahf_halos(path: Path) -> Tuple[pd.DataFrame, Dict[int, int]]:
 
     # whitespace-delimited rows
     # NOTE: only pandas can handle this (at present March 2026)
-    df = pd.read_csv(path, comment='#', delim_whitespace=True, names=clean_headers)
+    dtypes = {key: np.int64 for key in ('ID', 'hostHalo') if key in clean_headers}
+    df = pd.read_csv(path, comment='#', sep=r'\s+', names=clean_headers, dtype=dtypes)
 
     return df # convert to polars
 
@@ -159,7 +161,171 @@ def read_ahf_particles_c(filepath, n_estimate=None):
     
     return out_hids[:n].copy(), out_pids[:n].copy(), result_ptypes.copy()
 
+def _remap_ahf_ids(halo_ids, parent_ids, member_hids):
+    unique_raw = np.unique(halo_ids)
+    halo_ids = np.searchsorted(unique_raw, halo_ids)
+    valid_parents = parent_ids != -1
+    parent_pos = np.searchsorted(unique_raw, parent_ids[valid_parents])
+    parent_matched = unique_raw[np.clip(parent_pos, 0, len(unique_raw) - 1)] == parent_ids[valid_parents]
+    new_parent_ids = np.full_like(parent_ids, -1)
+    new_parent_ids[valid_parents] = np.where(parent_matched, parent_pos, -1)
+    member_pos = np.searchsorted(unique_raw, member_hids)
+    matched = unique_raw[np.clip(member_pos, 0, len(unique_raw) - 1)] == member_hids
+    return halo_ids, new_parent_ids, np.where(matched, member_pos, -1)
+
+def read_ahf_membership(particles_path, halos_path=None):
+    particles_path = Path(particles_path)
+    if halos_path is None:
+        halos_path = particles_path.with_name(particles_path.name.replace('particles', 'halos'))
+    else:
+        halos_path = Path(halos_path)
+
+    properties = read_ahf_halos(halos_path)
+    member_hids, member_pids, member_ptypes = read_ahf_particles_c(particles_path)
+    halo_ids = properties['ID'].to_numpy().astype(np.int64)
+    parent_ids = properties['hostHalo'].to_numpy().astype(np.int64)
+    parent_ids[parent_ids == 0] = -1
+    halo_ids, parent_ids, member_hids = _remap_ahf_ids(halo_ids, parent_ids, member_hids)
+    return HaloTree(halo_ids, parent_ids, properties), member_hids, member_pids, member_ptypes
+
+def _membership_array_exclusive_ids(halo_id_array: np.ndarray) -> np.ndarray:
+    out = np.full(len(halo_id_array), -1, dtype=np.int64)
+    for col in range(halo_id_array.shape[1]):
+        values = halo_id_array[:, col]
+        np.copyto(out, values, where=values >= 0)
+    return out
+
+def _build_halo_ancestor_arrays(tree: HaloTree, width: int) -> np.ndarray:
+    arrays = np.full((len(tree._id_to_idx), width), -1, dtype=np.int32)
+    for halo_id in tree.halo_ids:
+        current = int(halo_id)
+        while current != -1:
+            row = tree._id_to_idx[current]
+            if row == -1:
+                break
+            arrays[int(halo_id), int(tree.depths[row])] = current
+            current = int(tree.parent_ids[row])
+    return arrays
+
+def read_ahf_tree(halos_path):
+    properties = read_ahf_halos(Path(halos_path))
+    raw_halo_ids = properties['ID'].to_numpy(dtype=np.int64)
+    parent_ids = properties['hostHalo'].to_numpy(dtype=np.int64)
+    parent_ids[parent_ids == 0] = -1
+    halo_ids, parent_ids, _ = _remap_ahf_ids(raw_halo_ids, parent_ids, np.empty(0, dtype=np.int64))
+    return HaloTree(halo_ids, parent_ids, properties), np.sort(raw_halo_ids)
+
+def _load_ahf_parser():
+    so_path = Path(__file__).parent / 'ahf_parser.so'
+    if not so_path.exists():
+        raise FileNotFoundError(f'Compiled parser not found at {so_path}. Compile with: gcc -O2 -shared -fPIC -o ahf_parser.so ahf_parser.c')
+    return ctypes.CDLL(str(so_path))
+
+def _scan_max_particle_id(snapshot, config, pid_dataset, chunk_size=20_000_000):
+    max_pid = 0
+    for ptype_name in config['ptype_names'].values():
+        if ptype_name not in snapshot:
+            continue
+        dataset = snapshot[ptype_name][pid_dataset]
+        for start in range(0, len(dataset), chunk_size):
+            pids = dataset[start:start + chunk_size]
+            if len(pids):
+                max_pid = max(max_pid, int(pids.max()))
+    return max_pid
+
+def _build_particle_lookups(snapshot, config, pid_dataset, max_pid, chunk_size=20_000_000):
+    sentinel = np.iinfo(np.uint32).max
+    lookups = [np.full(max_pid + 1, sentinel, dtype=np.uint32) for _ in range(4)]
+    for ptype, ptype_name in config['ptype_names'].items():
+        if ptype_name not in snapshot:
+            continue
+        slot = PTYPE_ENCODE[ptype]
+        dataset = snapshot[ptype_name][pid_dataset]
+        if len(dataset) >= sentinel:
+            raise ValueError(f'{ptype_name} has too many particles for uint32 row lookup')
+        for start in range(0, len(dataset), chunk_size):
+            end = min(start + chunk_size, len(dataset))
+            pids = dataset[start:end]
+            lookups[slot][pids] = np.arange(start, end, dtype=np.uint32)
+    return lookups
+
+def _allocate_membership_arrays(snapshot, config, pid_dataset, width):
+    membership_arrays = {}
+    by_slot = [np.empty((0, width), dtype=np.int32) for _ in range(4)]
+    for ptype, ptype_name in config['ptype_names'].items():
+        if ptype_name not in snapshot:
+            continue
+        halo_id_array = np.full((len(snapshot[ptype_name][pid_dataset]), width), -1, dtype=np.int32)
+        membership_arrays[ptype_name] = halo_id_array
+        by_slot[PTYPE_ENCODE[ptype]] = halo_id_array
+    return membership_arrays, by_slot
+
+def build_ahf_snapshot_membership_arrays(snapshot, config, particles_path, halos_path=None):
+    particles_path = Path(particles_path)
+    if halos_path is None:
+        halos_path = particles_path.with_name(particles_path.name.replace('particles', 'halos'))
+    t = perf_counter()
+    tree, raw_halo_ids = read_ahf_tree(halos_path)
+    print(f'  AHF halo tree: {perf_counter() - t:.1f}s', flush=True)
+    pid_dataset = config.get('prop_aliases', {}).get('pid', 'ParticleIDs')
+    width = int(tree.depths.max()) + 1
+    ancestor_arrays = _build_halo_ancestor_arrays(tree, width)
+
+    t = perf_counter()
+    max_pid = _scan_max_particle_id(snapshot, config, pid_dataset)
+    lookups = _build_particle_lookups(snapshot, config, pid_dataset, max_pid)
+    print(f'  Particle ID lookups: {perf_counter() - t:.1f}s', flush=True)
+    t = perf_counter()
+    membership_arrays, arrays_by_slot = _allocate_membership_arrays(snapshot, config, pid_dataset, width)
+    print(f'  Membership array allocation: {perf_counter() - t:.1f}s', flush=True)
+
+    lib = _load_ahf_parser()
+    lib.fill_ahf_membership_arrays.restype = ctypes.c_long
+    lib.fill_ahf_membership_arrays.argtypes = [
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_int64),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.c_long,
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.c_int64,
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_uint64),
+    ]
+    counts = np.zeros(8, dtype=np.uint64)
+    t = perf_counter()
+    written = lib.fill_ahf_membership_arrays(
+        str(particles_path).encode(),
+        raw_halo_ids.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),
+        ancestor_arrays.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        len(raw_halo_ids),
+        lookups[0].ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
+        lookups[1].ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
+        lookups[2].ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
+        lookups[3].ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
+        max_pid,
+        width,
+        arrays_by_slot[0].ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        arrays_by_slot[1].ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        arrays_by_slot[2].ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        arrays_by_slot[3].ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+        counts.ctypes.data_as(ctypes.POINTER(ctypes.c_uint64)),
+    )
+    if written < 0:
+        raise IOError(f'Failed to open {particles_path}')
+    print(f'  AHF particle stream: {perf_counter() - t:.1f}s', flush=True)
+    return tree, membership_arrays, counts
+
 def load_ahf(data_manager, particles_path, halos_path=None, mode='field'):
+
+    data_manager.config['halo_source'] = 'ahf'
+    data_manager.config['halo_mode'] = mode
 
     particles_path = Path(particles_path)
     
@@ -171,36 +337,35 @@ def load_ahf(data_manager, particles_path, halos_path=None, mode='field'):
         halos_path = Path(halos_path)
 
     print(f"Loading AHF data...")
-    t1 = perf_counter()
-    properties = read_ahf_halos(halos_path)
-    member_hids, member_pids, member_ptypes = read_ahf_particles_c(particles_path)
-    t2 = perf_counter()
-    print(f"Finished in {(t2 - t1):.3f} seconds.")
-    
-    halo_ids = properties['ID'].to_numpy().astype(np.int64)
-    parent_ids = properties['hostHalo'].to_numpy().astype(np.int64)
-    parent_ids[parent_ids == 0] = -1 # AHF sets field halos equal to 0 but we want them as -1
-    
-    print(f"Extracting halo structure and membership...")
     t0 = perf_counter()
-    reader = HaloReader(data_manager)
-    print("Remapping IDs...")
-    t1 = perf_counter()
-    halo_ids, parent_ids, member_hids = reader.remap_ids(halo_ids, parent_ids, member_hids)
-    print(f"  Remap: {perf_counter() - t1:.3f}s")
 
-    t1 = perf_counter()
-    tree = HaloTree(halo_ids, parent_ids, properties)
-    print(f"  HaloTree: {perf_counter() - t1:.3f}s")
+    if mode == 'subhalo':
+        with h5py.File(data_manager.snapfile, 'r') as f:
+            tree, membership_arrays, counts = build_ahf_snapshot_membership_arrays(f, data_manager.config, particles_path, halos_path)
+        data_manager.halo_tree = tree
+        for ptype in data_manager.config['ptypes']:
+            ptype_name = data_manager.get_ptype_name(ptype)
+            halo_id_array = membership_arrays[ptype_name]
+            data_manager.halo_id_arrays[ptype] = halo_id_array
+            data_manager.data[ptype]['HaloID'] = pd.Series(_membership_array_exclusive_ids(halo_id_array), dtype='category')
+        print(f"  Membership array assign: {perf_counter() - t0:.3f}s")
+        print(f"  AHF memberships written: {int(counts[:4].sum())}, conflicts resolved: {int(counts[7])}")
+    else:
+        t1 = perf_counter()
+        tree, member_hids, member_pids, member_ptypes = read_ahf_membership(particles_path, halos_path)
+        print(f"Finished in {(perf_counter() - t1):.3f} seconds.")
+    
+        print(f"Extracting halo structure and membership...")
+        t0 = perf_counter()
+        print(f"  HaloTree: {perf_counter() - t0:.3f}s")
+        data_manager.halo_tree = tree
+        reader = HaloReader(data_manager)
+        t1 = perf_counter()
+        membership = HaloMembership(tree, member_hids, member_pids, member_ptypes, exclusive=False)
+        data_manager.halo_membership = membership
+        print(f"  HaloMembership: {perf_counter() - t1:.3f}s")
 
-    t1 = perf_counter()
-    membership = HaloMembership(tree, member_hids, member_pids, member_ptypes, exclusive=False)
-    print(f"  HaloMembership: {perf_counter() - t1:.3f}s")
-
-    data_manager.halo_tree = tree
-    data_manager.halo_membership = membership
-
-    t1 = perf_counter()
-    reader.assign(membership, mode)
-    print(f"  Assign: {perf_counter() - t1:.3f}s")
+        t1 = perf_counter()
+        reader.assign(membership, mode)
+        print(f"  Assign: {perf_counter() - t1:.3f}s")
     print(f"Finished in {(perf_counter() - t0):.3f} seconds.")

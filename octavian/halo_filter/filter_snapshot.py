@@ -1,6 +1,9 @@
 import h5py
 import numpy as np
+from time import perf_counter
 from yaml import safe_load
+
+from octavian.halo_reader.ahf import build_ahf_snapshot_membership_arrays, _membership_array_exclusive_ids
 
 def find_nearest(array, value):
     idx = (np.abs(array - value)).argmin()
@@ -29,6 +32,74 @@ def get_id_filter(f: h5py.File, ptypes: list[str], nsplit: int) -> list[list[int
 
   return id_filter
 
+def filter_snapshot_with_membership_arrays(f: h5py.File, outfile: str, config: dict, nsplit: int, membership_arrays: dict[str, np.ndarray]):
+  for i in range(nsplit):
+    with h5py.File(f'{outfile}_{i}.hdf5', 'a') as f_out:
+      f.copy(f['Header'], f_out, 'Header')
+
+  ptypes = list(membership_arrays)
+  star_weights, gas_weights, dm_weights = {}, {}, {}
+  for ptype_name, weight_dict in [('PartType4', star_weights), ('PartType0', gas_weights), ('PartType1', dm_weights)]:
+    if ptype_name not in membership_arrays:
+      continue
+    top_ids = membership_arrays[ptype_name][:, 0]
+    unique, counts = np.unique(top_ids[top_ids >= 0], return_counts=True)
+    for hid, count in zip(unique, counts):
+      weight_dict[hid] = count
+
+  weights = {}
+  for hid in set(star_weights) | set(gas_weights) | set(dm_weights):
+    n_total = star_weights.get(hid, 0) + gas_weights.get(hid, 0) + dm_weights.get(hid, 0)
+    if n_total < config['MINIMUM_DM_PER_HALO']: continue
+    fof6d_cost = (star_weights.get(hid, 0))**1.2 + gas_weights.get(hid, 0)
+    cgp_cost = n_total
+    weights[hid] = 0.6 * fof6d_cost + 0.4 * cgp_cost
+
+  rank_assignments = [set() for _ in range(nsplit)]
+  rank_loads = [0] * nsplit
+  for hid in sorted(weights, key=weights.get, reverse=True):
+    lightest = np.argmin(rank_loads)
+    rank_assignments[lightest].add(hid)
+    rank_loads[lightest] += weights[hid]
+
+  max_halo_id = max(weights) if weights else -1
+  rank_lookup = np.full(max_halo_id + 1, -1, dtype=np.int16)
+  for rank, halo_ids in enumerate(rank_assignments):
+    if halo_ids:
+      rank_lookup[np.fromiter(halo_ids, dtype=np.int64)] = rank
+
+  for ptype in ptypes:
+    halo_id_array = membership_arrays[ptype]
+    ids = halo_id_array[:, 0]
+    halo_ids = _membership_array_exclusive_ids(halo_id_array)
+    particle_index = np.arange(len(ids), dtype='int')
+    assigned = np.zeros(len(ids), dtype=bool)
+    in_lookup = (ids >= 0) & (ids < len(rank_lookup))
+    assigned[in_lookup] = rank_lookup[ids[in_lookup]] >= 0
+    rank_ids = rank_lookup[ids[assigned]]
+    datasets = [dataset for dataset in f[ptype].keys() if dataset not in ('HaloID', 'HaloID_array', 'particle_index')]
+    datasets += ['HaloID', 'HaloID_array', 'particle_index']
+    rank_masks = [rank_ids == i for i in range(nsplit)]
+
+    out_files = [h5py.File(f'{outfile}_{i}.hdf5', 'a') for i in range(nsplit)]
+    try:
+      for dataset in datasets:
+        print(ptype, dataset, flush=True)
+        if dataset == 'HaloID':
+          data = halo_ids[assigned]
+        elif dataset == 'HaloID_array':
+          data = halo_id_array[assigned]
+        elif dataset == 'particle_index':
+          data = particle_index[assigned]
+        else:
+          data = f[ptype][dataset][:][assigned]
+        for i, f_out in enumerate(out_files):
+          f_out.require_group(ptype)
+          f_out[ptype][dataset] = data[rank_masks[i]]
+    finally:
+      for f_out in out_files:
+        f_out.close()
+
 def filter_snapshot(snapfile: str, outfile: str, configfile: str, nsplit: int=4):
   """
   Weighted snapshot filter.
@@ -46,6 +117,21 @@ def filter_snapshot(snapfile: str, outfile: str, configfile: str, nsplit: int=4)
     config = safe_load(f)
 
   with h5py.File(snapfile, 'r') as f:
+    if config.get('halo_mode') == 'subhalo':
+      if config.get('halo_source') != 'ahf':
+        raise NotImplementedError('Subhalo HaloID arrays are currently implemented for AHF only')
+      t = perf_counter()
+      print('Building AHF subhalo HaloID arrays...', flush=True)
+      _, membership_arrays, counts = build_ahf_snapshot_membership_arrays(
+        f, config, config['ahf_particles_path'], config.get('ahf_halos_path') or None
+      )
+      print(f'  Built AHF membership arrays: {perf_counter() - t:.1f}s', flush=True)
+      print(f'  AHF memberships written: {int(counts[:4].sum())}, conflicts resolved: {int(counts[7])}', flush=True)
+      t = perf_counter()
+      filter_snapshot_with_membership_arrays(f, outfile, config, nsplit, membership_arrays)
+      print(f'  Wrote split snapshots: {perf_counter() - t:.1f}s', flush=True)
+      return
+
     for i in range(nsplit):
       with h5py.File(f'{outfile}_{i}.hdf5', 'a') as f_out:
         f.copy(f['Header'], f_out, 'Header')

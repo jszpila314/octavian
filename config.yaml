@@ -12,6 +12,7 @@ ptype_lists:
   bh: bhlist
 
 prop_aliases:
+  pid: ParticleIDs
   particle_index: particle_index
   pos: Coordinates
   vel: Velocities
@@ -28,15 +29,26 @@ prop_aliases:
   fH2: FractionH2
   bhmass: BH_Mass
   bhmdot: BH_Mdot
+  dustmass: Dust_Masses
 
 dataset_columns:
-  groupID: 'HaloID'
-  groupID: 'GalID'
+  groupID:
+    halos: HaloID
+    galaxies: GalID
   parent_halo_index: 'parent_halo_index'
+  central:
+    galaxies: central
+  central_galaxy:
+    halos: central_galaxy
   ngas: 'ngas'
   nstar: 'nstar'
   ndm: 'ndm'
   nbh: 'nbh'
+  ndust: 'ndust'
+  sfr: sfr
+  sfr_100: sfr_100
+  bhmdot: bhmdot
+  bh_fedd: bh_fedd
   pos: ['x_total', 'y_total', 'z_total']
   vel: ['vx_total', 'vy_total', 'vz_total']
   minpotpos: ['minpot_x', 'minpot_y', 'minpot_z']
@@ -45,40 +57,59 @@ dataset_columns:
   dicts/masses.stellar: mass_star
   dicts/masses.dm: mass_dm
   dicts/masses.bh: mass_bh
+  dicts/masses.dust: mass_dust
   dicts/masses.HI: mass_HI
   dicts/masses.H2: mass_H2
+  dicts/masses.HI_ism: mass_HI_ism
+  dicts/masses.H2_ism: mass_H2_ism
+  dicts/masses.baryon: mass_baryon
   dicts/masses.total: mass_total
   dicts/masses.gas_30kpc: mass_gas_30kpc
+  dicts/masses.star_30kpc: mass_star_30kpc
   dicts/masses.stellar_30kpc: mass_star_30kpc
   dicts/masses.dm_30kpc: mass_dm_30kpc
   dicts/masses.bh_30kpc: mass_bh_30kpc
   dicts/masses.HI_30kpc: mass_HI_30kpc
   dicts/masses.H2_30kpc: mass_H2_30kpc
+  dicts/masses.dust_30kpc: mass_dust_30kpc
   dicts/masses.total_30kpc: mass_total_30kpc
   dicts/radii.gas_r20: radius_gas_r20
   dicts/radii.gas_half_mass: radius_gas_half_mass
   dicts/radii.gas_r80: radius_gas_r80
+  dicts/radii.gas_rmax: radius_gas_rmax
   dicts/radii.stellar_r20: radius_star_r20
   dicts/radii.stellar_half_mass: radius_star_half_mass
   dicts/radii.stellar_r80: radius_star_r80
+  dicts/radii.stellar_rmax: radius_star_rmax
   dicts/radii.dm_r20: radius_dm_r20
   dicts/radii.dm_half_mass: radius_dm_half_mass
   dicts/radii.dm_r80: radius_dm_r80
+  dicts/radii.dm_rmax: radius_dm_rmax
   dicts/radii.bh_r20: radius_bh_r20
   dicts/radii.bh_half_mass: radius_bh_half_mass
   dicts/radii.bh_r80: radius_bh_r80
+  dicts/radii.bh_rmax: radius_bh_rmax
   dicts/radii.baryon_r20: radius_baryon_r20
   dicts/radii.baryon_half_mass: radius_baryon_half_mass
   dicts/radii.baryon_r80: radius_baryon_r80
+  dicts/radii.baryon_rmax: radius_baryon_rmax
   dicts/radii.total_r20: radius_total_r20
   dicts/radii.total_half_mass: radius_total_half_mass
   dicts/radii.total_r80: radius_total_r80
+  dicts/radii.total_rmax: radius_total_rmax
   dicts/velocity_dispersions.gas: velocity_dispersion_gas
   dicts/velocity_dispersions.stellar: velocity_dispersion_star
   dicts/velocity_dispersions.dm: velocity_dispersion_dm
   dicts/velocity_dispersions.bh: velocity_dispersion_bh
   dicts/velocity_dispersions.baryon: velocity_dispersion_baryon
   dicts/velocity_dispersions.total: velocity_dispersion_total
+  dicts/velocity_dispersions.gas_30kpc: velocity_dispersion_gas_30kpc
+  dicts/velocity_dispersions.stellar_30kpc: velocity_dispersion_star_30kpc
+  dicts/velocity_dispersions.dm_30kpc: velocity_dispersion_dm_30kpc
+  dicts/velocity_dispersions.bh_30kpc: velocity_dispersion_bh_30kpc
+  dicts/velocity_dispersions.dust_30kpc: velocity_dispersion_dust_30kpc
+  dicts/velocity_dispersions.baryon_30kpc: velocity_dispersion_baryon_30kpc
+  dicts/velocity_dispersions.total_30kpc: velocity_dispersion_total_30kpc
   dicts/rotation.gas_L: ['Lx_gas', 'Ly_gas', 'Lz_gas']
   dicts/rotation.stellar_L: ['Lx_star', 'Ly_star', 'Lz_star']
   dicts/rotation.dm_L: ['Lx_dm', 'Ly_dm', 'Lz_dm']
@@ -136,6 +167,37 @@ dataset_columns:
   dicts/local_number_density.1000: local_number_density_1000
   dicts/local_number_density.3000: local_number_density_3000
 
+dataset_columns_by_halo_source:
+  ahf:
+    AHF_haloID:
+      halos: AHF_haloID
+      galaxies: AHF_haloID
+    AHF_parent_haloID:
+      halos: AHF_parent_haloID
+      galaxies: AHF_parent_haloID
+    AHF_top_haloID:
+      halos: AHF_top_haloID
+      galaxies: AHF_top_haloID
+    AHF_depth:
+      halos: AHF_depth
+      galaxies: AHF_depth
+    _ahf_host_halo_index:
+      galaxies: _ahf_host_halo_index
+    caesar_parent_halo_index:
+      halos: caesar_parent_halo_index
+      galaxies: caesar_parent_halo_index
+    caesar_top_halo_index:
+      halos: caesar_top_halo_index
+      galaxies: caesar_top_halo_index
+    child:
+      halos: child
+
+list_dataset_columns_by_halo_source:
+  ahf:
+    AHF_ancestor_haloIDs:
+      halos: AHF_ancestor_haloIDs
+      galaxies: AHF_ancestor_haloIDs
+
 
 prop_columns:
   pos: [x, y, z]
@@ -153,6 +215,7 @@ MINIMUM_STARS_PER_GALAXY: 16
 MINIMUM_DM_PER_HALO: 24
 MINIMUM_GAS_PER_CLOUD: 16
 nHlim: 0.13
+low_nHlim: 0.001
 Tlim: 1.0e5
 XH: 0.76
 
@@ -164,10 +227,11 @@ prop_units:
   mass: 1.e10 * Msun/h
   temperature: K
   rho: 1.e10 * Msun/h / (kpc*a/h)**3
-  nh: 1.e10 * Msun/h
-  sfr: 1.e10 * Msun/h/s
+  nh: dimensionless
+  sfr: Msun/yr
   bhmass: 1.e10 * Msun/h
-  bhmdot: 1.e10 * Msun/h/s
+  bhmdot: 10.22465727143273 * Msun/h/yr
+  dustmass: 1.e10 * Msun/h
 
 code_units:
   pos: kpc*a
@@ -176,10 +240,11 @@ code_units:
   temperature: K
   rho: g/cm**3
   rhocrit: Msun/kpc**3
-  nh: Msun
-  sfr: Msun/s
+  nh: dimensionless
+  sfr: Msun/yr
   bhmass: Msun
-  bhmdot: Msun/s
+  bhmdot: Msun/yr
+  dustmass: Msun
 
 # PARALLELISM
 nproc: 1 # cores per node for joblib

@@ -63,6 +63,8 @@ class DataManager:
 
   def initialise_data(self) -> None:
     self.data = {}
+    self.halo_id_arrays = {}
+    self.halo_membership_rows = {}
     
     ptypes = self.config['ptypes']
     
@@ -84,12 +86,17 @@ class DataManager:
       ids = []
       for ptype in ptypes:
         id_column = groupIDs[group]
-        ids.append(self.data[ptype][id_column].unique())
+        if group == 'halos' and ptype in self.halo_id_arrays:
+          halo_ids, _ = self.get_halo_membership_rows(ptype)
+          ids.append(halo_ids)
+        else:
+          ids.append(self.data[ptype][id_column].unique())
 
       ids = np.unique(np.concatenate(ids))
       if group == 'galaxies': ids = ids[ids != -1]
 
       self.group_data[group] = pd.DataFrame(index=ids)
+      self.group_data[group][id_column] = ids
 
   def load_simulation_constants(self) -> None:
     self.simulation = {}
@@ -146,7 +153,29 @@ class DataManager:
     with h5py.File(self.snapfile) as f:
       for ptype in self.config['ptypes']:
         ptype_name = self.get_ptype_name(ptype)
+        if 'HaloID_array' in f[ptype_name]:
+          self.halo_id_arrays[ptype] = f[ptype_name]['HaloID_array'][:].astype(np.int32, copy=False)
         self.data[ptype]['HaloID'] = pd.Series(f[ptype_name]['HaloID'][:], dtype='category')
+
+  def get_halo_ids(self, ptype: str, mode: str = 'exclusive') -> np.ndarray:
+    if mode == 'exclusive':
+      return self.data[ptype]['HaloID'].to_numpy()
+    if mode == 'top':
+      if ptype not in self.halo_id_arrays:
+        raise KeyError(f'HaloID_array not loaded for {ptype}')
+      return self.halo_id_arrays[ptype][:, 0]
+    raise ValueError(f'Unsupported HaloID mode: {mode}')
+
+  def get_halo_membership_rows(self, ptype: str) -> tuple[np.ndarray, np.ndarray]:
+    if ptype not in self.halo_id_arrays:
+      return self.get_halo_ids(ptype), np.arange(len(self.data[ptype]))
+    if ptype in self.halo_membership_rows:
+      return self.halo_membership_rows[ptype]
+    halo_id_array = self.halo_id_arrays[ptype]
+    particle_rows, array_cols = np.nonzero(halo_id_array >= 0)
+    rows = (halo_id_array[particle_rows, array_cols], particle_rows)
+    self.halo_membership_rows[ptype] = rows
+    return rows
   
   def get_unit_conversion_factor(self, prop: str) -> float:
     try:
@@ -164,13 +193,18 @@ class DataManager:
     for ptype in self.config['ptypes']:
       self.data[ptype]['ptype'] = pd.Series(np.full(len(self.data[ptype]), ptype), dtype='category')
 
-  def load_property(self, prop: str, ptype: str):
+  def load_property(self, prop: str, ptype: str, optional: bool = False, default=0.):
     column = self.get_column_name(prop)
     prop_name = self.get_prop_name(prop)
     ptype_name = self.get_ptype_name(ptype)
     self.logger.info(f'Loading data: {column}')
 
     with h5py.File(self.snapfile) as f:
+      if prop_name not in f[ptype_name]:
+        if optional:
+          self.data[ptype][column] = default
+          return False
+        raise KeyError(f'{prop_name} not found for {ptype_name}')
       if prop == 'metallicity':
         self.data[ptype][column] = f[ptype_name][prop_name][:, 0]
       elif prop == 'age':
@@ -178,4 +212,5 @@ class DataManager:
         self.data[ptype][column] = self.simulation['time_gyr'] - self.cosmology.age(1/data - 1).value
       else:
         self.data[ptype][column] = f[ptype_name][prop_name][:] * self.get_unit_conversion_factor(prop)
+    return True
   
