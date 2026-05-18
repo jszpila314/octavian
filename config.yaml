@@ -215,6 +215,7 @@ MINIMUM_STARS_PER_GALAXY: 16
 MINIMUM_DM_PER_HALO: 24
 MINIMUM_GAS_PER_CLOUD: 16
 nHlim: 0.13
+low_nHlim: 0.001
 Tlim: 1.0e5
 XH: 0.76
 
@@ -226,7 +227,7 @@ prop_units:
   mass: 1.e10 * Msun/h
   temperature: K
   rho: 1.e10 * Msun/h / (kpc*a/h)**3
-  nh: 1.e10 * Msun/h
+  nh: dimensionless
   sfr: 1.e10 * Msun/h/s
   bhmass: 1.e10 * Msun/h
   bhmdot: 1.e10 * Msun/h/s
@@ -239,7 +240,7 @@ code_units:
   temperature: K
   rho: g/cm**3
   rhocrit: Msun/kpc**3
-  nh: Msun
+  nh: dimensionless
   sfr: Msun/s
   bhmass: Msun
   bhmdot: Msun/s

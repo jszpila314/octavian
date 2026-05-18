@@ -1150,9 +1150,11 @@ def calculate_group_properties(data_manager: DataManager) -> None:
     # gas masses
     data = data_manager.data['gas']
     mass = data['mass'].to_numpy()
-    fHI = _safe_divide(data['nh'].to_numpy(), mass, fill=0.)
+    rho = data['rho'].to_numpy()
+    fHI = data['nh'].to_numpy().copy()
     fH2 = data['fH2'].to_numpy().copy()
-    fH2[data['rho'].to_numpy() < config['nHlim']] = 0.
+    fHI[rho < config['low_nHlim']] = 0.
+    fH2[rho < config['nHlim']] = 0.
     not_conserving_mass = (fHI + fH2) > 1.
     fHI[not_conserving_mass] = 1. - fH2[not_conserving_mass]
 
