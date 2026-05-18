@@ -228,9 +228,9 @@ prop_units:
   temperature: K
   rho: 1.e10 * Msun/h / (kpc*a/h)**3
   nh: dimensionless
-  sfr: 1.e10 * Msun/h/s
+  sfr: Msun/yr
   bhmass: 1.e10 * Msun/h
-  bhmdot: 1.e10 * Msun/h/s
+  bhmdot: 10.22465727143273 * Msun/h/yr
   dustmass: 1.e10 * Msun/h
 
 code_units:
@@ -241,9 +241,9 @@ code_units:
   rho: g/cm**3
   rhocrit: Msun/kpc**3
   nh: dimensionless
-  sfr: Msun/s
+  sfr: Msun/yr
   bhmass: Msun
-  bhmdot: Msun/s
+  bhmdot: Msun/yr
   dustmass: Msun
 
 # PARALLELISM
